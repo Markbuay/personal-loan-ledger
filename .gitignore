@@ -1,0 +1,10 @@
+node_modules/
+dist/
+server-dist/
+.data/
+.worktrees/
+.env
+.env.*
+!.env.example
+*.log
+qa-temp/
