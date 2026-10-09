@@ -1,4 +1,4 @@
-import type { Loan, Payment, RateChange, Adjustment, LedgerSnapshot, InterestPeriod } from './types';
+import type { Loan, Payment, RateChange, Adjustment, LedgerSnapshot, InterestPeriod } from './types.js';
 type LedgerInput = { loan: Loan; payments: Payment[]; rateChanges: RateChange[]; adjustments: Adjustment[]; asOf: string };
 const DAY = 86400000;
 function parseDate(date: string): Date {
@@ -104,6 +104,7 @@ export function validatePayment(input: Omit<LedgerInput, 'asOf'> & { payment: Pa
   if (payment.interestCents > balance.payoffInterestCents) throw new Error('ยอดชำระดอกเกินดอกที่เกิดขึ้นถึงวันรับชำระ');
   if (payment.isPayoff && (payment.principalCents !== balance.principalCents || payment.interestCents !== balance.payoffInterestCents)) throw new Error('ยอดปิดหนี้ต้องตรงกับต้นและดอกถึงวันรับชำระ');
 }
+
 
 
 
