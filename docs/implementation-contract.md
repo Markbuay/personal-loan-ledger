@@ -36,8 +36,10 @@ Node server exports createApp({ dataDir, staticDir?, clock? }) -> { server, clos
 - GET /api/backup -> complete versioned JSON with ledger history AND base64 attachments, excludes auth passwords/session secrets
 - GET /api/export -> BOM CSV safe against spreadsheet formula injection
 - GET /api/reminders -> { items: [{loanId,borrowerName,dueDate,kind:'tomorrow'|'today'|'overdue'}], serverTime }
-- GET /api/health -> {ok:true} no data
+- GET /api/health -> {ok:true,app:'personal-loan-ledger'} no data
 
 Use X-CSRF-Token header for authenticated writes, frontend obtains token from auth/status or login response. Auth requests need same-origin Origin check without csrf. API errors {error:string}, non-2xx. Do not swallow failed writes.
+
+After any proposed payment/cancellation/adjustment mutation revalidate all active payments for the affected loan chronologically against the candidate history before committing, because a backdated mutation may invalidate later exact payoff allocations. Reject operations on finalized loans unless final principal/payment is canceled first. Loan source enum must be validated, never silently coerce arbitrary strings to existing. Rate changes must be future cycle boundaries (or explicitly justified adjustment, separate API). Index loads optional .env with process.loadEnvFile, and no secret is exposed in backup. Server public export createApp should support API-driven integration tests with clock; if ledger validator todayBangkok uses real clock tests use past fixed dates.
 
 No seeded borrowers or real-looking fake balances in production. Browser QA uses a separate LOAN_DATA_DIR; remove QA data before handoff.
