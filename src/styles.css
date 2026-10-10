@@ -39,3 +39,28 @@
   .interest-breakdown summary { padding: 16px 18px; }
   .interest-detail h3 { margin-left: 18px; margin-right: 18px; }
 }
+.interest-people-tools { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 24px; }
+.interest-people-tools p { color: #64776e; font-size: 13px; line-height: 1.7; }
+.interest-people-tools input { max-width: 260px; width: 100%; padding: 10px 12px; border: 1px solid #d4dddf; border-radius: 8px; background: #fff; }
+.interest-people { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; padding: 0 24px 24px; }
+.interest-person { border: 1px solid #dce8e0; border-radius: 10px; background: #fbfdfc; min-width: 0; overflow: hidden; }
+.interest-person-heading { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 17px 18px; border-bottom: 1px solid #e3ece6; }
+.interest-person-heading h3 { font-size: 20px; color: #07513f; }
+.interest-person-heading span { font-size: 12px; color: #64776e; }
+.interest-person-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; padding: 18px; }
+.interest-person-metrics p { font-size: 12px; color: #566860; margin-bottom: 8px; }
+.interest-person-metrics strong { display: block; color: #07513f; font-size: 22px; overflow-wrap: anywhere; line-height: 1.4; }
+.interest-person-metrics small { display: block; font-size: 11px; margin-top: 7px; line-height: 1.7; }
+.interest-person-loans { border-top: 1px solid #e3ece6; }
+.interest-person-loans summary { cursor: pointer; padding: 13px 18px; color: #07513f; font-size: 13px; }
+.interest-person-loan { padding: 16px 18px; border-top: 1px solid #e3ece6; }
+.interest-person-loan p { color: #566860; font-size: 12px; line-height: 1.9; margin-top: 6px; }
+.interest-person-loan button { font-size: 13px; }
+@media (max-width: 1250px) { .interest-people { grid-template-columns: 1fr; } }
+@media (max-width: 650px) {
+  .interest-people-tools { flex-direction: column; align-items: stretch; padding: 16px 18px; }
+  .interest-people-tools input { max-width: none; }
+  .interest-people { padding: 0 18px 18px; }
+  .interest-person-metrics { grid-template-columns: 1fr; gap: 16px; }
+  .interest-person-metrics strong { font-size: 24px; }
+}
