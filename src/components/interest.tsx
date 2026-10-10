@@ -1,0 +1,60 @@
+import type { InterestForecast, LedgerData, Loan } from "../domain/types";
+import { date, money } from "./ui";
+
+export function InterestOverview({ data, forecasts, select, today }: {
+  data: LedgerData; forecasts: Map<string, InterestForecast>;
+  select: (id: string) => void; today: string;
+}) {
+  const totals = [...forecasts.values()].reduce((sum, item) => ({
+    earned: sum.earned + item.month.earnedInterestCents,
+    full: sum.full + (item.cycle.accruing ? item.cycle.fullInterestCents : 0),
+    forecast: sum.forecast + item.month.forecastInterestCents,
+    additional: sum.additional + item.month.additionalInterestCents,
+  }), { earned: 0, full: 0, forecast: 0, additional: 0 });
+  const monthEnd = forecasts.values().next().value?.month.endDate;
+  return <section className="panel interest-panel">
+    <div className="panel-heading"><h2>ดอกตามวันและคาดการณ์</h2><span className="interest-date">ณ {date(today)}</span></div>
+    <div className="interest-metrics">
+      <div><p>ดอกเดือนนี้ถึงวันนี้</p><strong>฿{money(totals.earned)}</strong><small>ดอกที่เกิดขึ้น รวมส่วนที่รับชำระแล้ว</small></div>
+      <div><p>ดอกเต็มรอบเดือน</p><strong>฿{money(totals.full)}</strong><small>รวมดอกเต็มรอบตามฐานต้นของแต่ละสัญญา</small></div>
+      <div className="interest-projection"><p>คาดการณ์ดอกถึงสิ้นเดือน</p><strong>฿{money(totals.forecast)}</strong><small>{monthEnd ? `ถึง ${date(monthEnd)} · ` : ""}เพิ่มอีก ฿{money(totals.additional)}</small></div>
+    </div>
+    <p className="interest-note">คำนวณตามจำนวนวันจริง นับวันเริ่มรอบ ไม่รวมวันนี้ · คาดการณ์สิ้นเดือนรวมวันสุดท้ายของเดือน และใช้อัตราใหม่ที่ตั้งไว้ โดยสมมติว่าไม่มีรับคืนต้นหรือปรับยอดเพิ่ม</p>
+    <details className="interest-breakdown">
+      <summary>ดูดอกแต่ละรายการ ({data.loans.length})</summary>
+      <div className="table-scroll"><table>
+        <thead><tr><th>ผู้กู้ / รายการ</th><th>วันที่นับ / วันในรอบ</th><th>ดอกเกิดขึ้นรอบนี้</th><th>ดอกเต็มรอบ</th><th>คาดการณ์ครบงวด</th><th>คาดการณ์เดือนนี้</th></tr></thead>
+        <tbody>{data.loans.map((loan) => {
+          const item = forecasts.get(loan.id);
+          if (!item) return null;
+          const borrower = data.borrowers.find((person) => person.id === loan.borrowerId);
+          return <tr key={loan.id}>
+            <td><button className="interest-loan" onClick={() => select(loan.id)}>{borrower?.name || "ผู้กู้"}</button><small>ต้นเริ่ม ฿{money(loan.principalCents)}</small></td>
+            <td>{item.cycle.elapsedDays} / {item.cycle.fullDays} วัน<small>ถึง {date(item.cycle.endDate)}</small></td>
+            <td>฿{money(item.cycle.earnedInterestCents)}</td>
+            <td>{item.cycle.accruing ? `฿${money(item.cycle.fullInterestCents)}` : "หยุดคิดดอกแล้ว"}</td>
+            <td>฿{money(item.cycle.forecastInterestCents)}</td>
+            <td>฿{money(item.month.forecastInterestCents)}</td>
+          </tr>;
+        })}</tbody>
+      </table></div>
+    </details>
+    {data.loans.some((loan) => loan.source === "existing") && <p className="interest-note">หนี้เดิมนับเฉพาะดอกตั้งแต่วันเริ่มบันทึก ไม่รวมดอกยกมาหรือประวัติที่ยังไม่ทราบ · ยอดคาดการณ์เป็นดอกที่เกิดขึ้น ไม่ใช่ยอดรับเงินจริง</p>}
+  </section>;
+}
+
+export function InterestDetail({ forecast, loan }: { forecast: InterestForecast; loan: Loan }) {
+  const { cycle, month } = forecast;
+  return <section className="interest-detail" aria-label="ดอกตามวันของสัญญา">
+    <h3>ดอกตามวันของสัญญา</h3>
+    <div className="interest-metrics">
+      <div><p>ดอกเกิดขึ้นรอบนี้</p><strong>฿{money(cycle.earnedInterestCents)}</strong><small>ผ่านไป {cycle.elapsedDays} จาก {cycle.fullDays} วัน</small></div>
+      <div><p>คาดการณ์เมื่อครบงวด</p><strong>฿{money(cycle.forecastInterestCents)}</strong><small>ตัดรอบ {date(cycle.endDate)}</small></div>
+      <div className="interest-projection"><p>คาดการณ์ดอกเดือนนี้</p><strong>฿{money(month.forecastInterestCents)}</strong><small>รวมถึง {date(month.endDate)}</small></div>
+    </div>
+    <p className="interest-formula">ดอกเต็มรอบ ฿{money(cycle.fullInterestCents)} ÷ {cycle.fullDays} วัน × {cycle.elapsedDays} วันที่ผ่าน</p>
+    <p className="interest-note">เริ่มนับ {date(cycle.chargeStartDate)} ไม่นับวันที่ {date(cycle.accrualEndDate)}{!cycle.accruing && " (หยุดคิดดอกแล้ว)"} ปัดยอดสุดท้ายเป็นสตางค์ · ดอกที่เกิดขึ้นรวมส่วนที่จ่ายแล้ว ส่วนยอดปิดหนี้หักส่วนที่จ่ายแล้ว</p>
+    {loan.startDate > loan.cycleStartDate && cycle.chargeStartDate === loan.startDate && <p className="interest-note">รอบแรกของหนี้ยกมานับเฉพาะวันที่เหลือจากวันเริ่มบันทึก ดอกครบงวดจึงอาจน้อยกว่าดอกเต็มรอบ</p>}
+    <p className="interest-note">คาดการณ์โดยไม่มีรับคืนต้นหรือปรับยอดเพิ่ม รวมอัตราใหม่ที่ตั้งไว้แล้ว หากคืนต้นบางส่วน ดอกรอบนี้ยังใช้ฐานต้นต้นรอบ และลดลงในรอบถัดไป</p>
+  </section>;
+}

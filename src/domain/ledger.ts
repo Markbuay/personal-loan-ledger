@@ -113,6 +113,7 @@ export function calculateLedger({
     interestPaid = 0;
   const periods: InterestPeriod[] = [];
   let finalized = false;
+  let accrualEnd = asOf;
   const activePayments = payments.filter(
     (p) => p.loanId === loan.id && !p.canceledAt && p.date <= asOf,
   );
@@ -191,6 +192,7 @@ export function calculateLedger({
           fullDays,
         });
       finalized = true;
+      accrualEnd = p.date;
     }
     principal -= p.principalCents;
     dueInterest -= p.interestCents;
@@ -212,12 +214,22 @@ export function calculateLedger({
     if (change.effectiveDate <= end) nextRate = change.rateBps;
   const arrears = Math.max(0, dueInterest),
     payableAccrued = Math.max(0, accrued + Math.min(0, dueInterest));
+  // Gross interest is independent of receipts and brought-forward balances.
+  const earnedInterest = periods.reduce((sum, period) => sum + period.interestCents, 0) + accrued;
+  const cycleEarned = periods
+    .filter((period) => period.startDate >= fullStart)
+    .reduce((sum, period) => sum + period.interestCents, accrued);
+  const fullDays = daysBetween(fullStart, end);
+  const elapsedDays = daysBetween(start, accrualEnd);
+  const cycleForecast = finalized ? cycleEarned : interest(base, rate, daysBetween(start, end), fullDays);
   for (const value of [
     principal,
     dueInterest,
     accrued,
     principalPaid,
     interestPaid,
+    earnedInterest,
+    cycleForecast,
     principal + arrears + payableAccrued,
   ]) {
     if (!Number.isSafeInteger(value))
@@ -236,6 +248,18 @@ export function calculateLedger({
     currentCycleStartDate: fullStart,
     currentCycleEndDate: end,
     nextCycleInterestCents: interest(principal, nextRate, 1, 1),
+    earnedInterestCents: earnedInterest,
+    cycleInterest: {
+      chargeStartDate: start,
+      endDate: end,
+      accrualEndDate: accrualEnd,
+      accruing: !finalized,
+      elapsedDays,
+      fullDays,
+      fullInterestCents: interest(base, rate, 1, 1),
+      earnedInterestCents: cycleEarned,
+      forecastInterestCents: cycleForecast,
+    },
     periods,
     closed: principal === 0 && dueInterest + accrued === 0,
   };

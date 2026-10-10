@@ -42,11 +42,14 @@ import {
   field,
 } from "./components/ui";
 import { calculateLedger, addMonths, todayBangkok } from "./domain/ledger";
+import { calculateInterestForecast } from "./domain/forecast";
+import { InterestOverview, InterestDetail } from "./components/interest";
 import type {
   Borrower,
   Loan,
   LedgerData,
   LedgerSnapshot,
+  InterestForecast,
 } from "./domain/types";
 
 type Auth = {
@@ -327,6 +330,13 @@ export default function App() {
     }),
     { principal: 0, interest: 0, principalPaid: 0, interestPaid: 0 },
   );
+  const forecasts = useMemo(
+    () => new Map(data.loans.map((loan) => [loan.id, calculateInterestForecast({
+      loan, payments: data.payments, rateChanges: data.rateChanges,
+      adjustments: data.adjustments, asOf: today,
+    })])),
+    [data, today],
+  );
   const borrowerName = (id: string) =>
     data.borrowers.find((b) => b.id === id)?.name || "ผู้กู้";
   const loans = data.loans.filter(
@@ -442,6 +452,7 @@ export default function App() {
           <LoanDetail
             loan={selectedLoan}
             snapshot={snapshot}
+            forecast={forecasts.get(selectedLoan.id)}
             data={data}
             back={() => setSelected(undefined)}
             open={setModal}
@@ -491,6 +502,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                <InterestOverview data={data} forecasts={forecasts} select={setSelected} today={today} />
                 <div className="dashboard-grid">
                   <section className="panel contracts">
                     <div className="panel-heading">
@@ -904,12 +916,14 @@ function LoanTable({
 function LoanDetail({
   loan,
   snapshot: s,
+  forecast,
   data,
   back,
   open,
 }: {
   loan: Loan;
   snapshot: LedgerSnapshot;
+  forecast: InterestForecast | undefined;
   data: LedgerData;
   back: () => void;
   open: (modal: Modal) => void;
@@ -949,6 +963,7 @@ function LoanDetail({
               <small>รวมดอกระหว่างรอบ ฿{money(s.accruedInterestCents)}</small>
             </div>
           </div>
+          {forecast && <InterestDetail forecast={forecast} loan={loan} />}
           <dl>
             <div>
               <dt>ประเภท</dt>

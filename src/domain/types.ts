@@ -49,5 +49,19 @@ export interface LedgerSnapshot {
   principalPaidCents: number; interestPaidCents: number;
   currentRateBps: number; currentCycleStartDate: string; currentCycleEndDate: string;
   nextCycleInterestCents: number; periods: InterestPeriod[];
+  earnedInterestCents: number;
+  cycleInterest: CycleInterest;
   closed: boolean;
+}
+export interface CycleInterest {
+  chargeStartDate: string; endDate: string; accrualEndDate: string; accruing: boolean;
+  elapsedDays: number; fullDays: number;
+  fullInterestCents: number; earnedInterestCents: number; forecastInterestCents: number;
+}
+export interface InterestForecast {
+  cycle: CycleInterest;
+  month: {
+    startDate: string; endDate: string; earnedInterestCents: number;
+    additionalInterestCents: number; forecastInterestCents: number;
+  };
 }
