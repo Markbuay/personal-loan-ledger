@@ -1,3 +1,4 @@
+param([switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
 $loanRoot = Split-Path -Parent $PSScriptRoot
 $loanData = Join-Path $loanRoot '.data'
@@ -17,4 +18,4 @@ if (-not (Test-LoanServer)) {
   for ($loanAttempt = 0; $loanAttempt -lt 40; $loanAttempt++) { if (Test-LoanServer) { break }; if ($loanProc.HasExited) { break }; Start-Sleep -Milliseconds 250; $loanProc.Refresh() }
   if (-not (Test-LoanServer)) { throw "App could not start. Read $loanData\server-error.log" }
 }
-Start-Process -FilePath $loanUrl
+if (-not $NoBrowser) { Start-Process -FilePath $loanUrl }

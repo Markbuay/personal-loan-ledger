@@ -1,0 +1,695 @@
+import { useEffect, useState, type FormEvent } from "react";
+import { Copy, Check, X } from "lucide-react";
+import { calculateLedger, addMonths, todayBangkok } from "../domain/ledger";
+import type {
+  Borrower,
+  Loan,
+  LedgerData,
+  LedgerSnapshot,
+} from "../domain/types";
+import { Button, Input, money, date, field, cents } from "./ui";
+export type Modal =
+  | { kind: "borrower"; borrower?: Borrower }
+  | { kind: "loan"; borrowerId?: string }
+  | {
+      kind: "payment" | "payoff" | "rate" | "adjustment" | "due" | "contact";
+      loan: Loan;
+    }
+  | { kind: "attachment"; loan: Loan }
+  | { kind: "payment-attachment"; loan: Loan; paymentId: string }
+  | { kind: "cancel"; path: string }
+  | { kind: "recovery"; code: string };
+export function ModalView({
+  modal,
+  data,
+  snapshots,
+  close,
+  submit,
+  uploadOnly,
+  busy,
+}: {
+  modal: Modal;
+  data: LedgerData;
+  snapshots: Map<string, LedgerSnapshot>;
+  close: () => void;
+  busy: boolean;
+  submit: (
+    path: string,
+    body: unknown,
+    method?: string,
+    file?: File,
+    ids?: Record<string, string>,
+  ) => Promise<void>;
+  uploadOnly: (file: File, ids: Record<string, string>) => Promise<void>;
+}) {
+  const [error, setError] = useState("");
+  const [source, setSource] = useState("new");
+  const [paymentDate, setPaymentDate] = useState(todayBangkok());
+  const [copied, setCopied] = useState(false);
+  const [channel, setChannel] = useState<"LINE" | "Facebook">("LINE");
+  const loan = "loan" in modal ? modal.loan : undefined;
+  const borrower = loan
+    ? data.borrowers.find((b) => b.id === loan.borrowerId)
+    : undefined;
+  const s = loan
+    ? calculateLedger({
+        loan,
+        payments: data.payments,
+        rateChanges: data.rateChanges,
+        adjustments: data.adjustments,
+        asOf:
+          paymentDate && paymentDate >= loan.startDate
+            ? paymentDate
+            : loan.startDate,
+      })
+    : undefined;
+  const [message, setMessage] = useState(
+    loan
+      ? `สวัสดี ${borrower?.nickname || borrower?.name} ขอแจ้งวันนัดชำระ ${date(loan.dueDate)} สำหรับรายการกู้ ${loan.id.slice(0, 8)} ดอกค้าง ${money(snapshots.get(loan.id)?.interestCents || 0)} บาท เงินต้นคงเหลือ ${money(snapshots.get(loan.id)?.principalCents || 0)} บาท หากชำระแล้วส่งหลักฐานให้ตรวจสอบได้ ขอบคุณครับ/ค่ะ`
+      : "",
+  );
+  const titles = {
+    borrower:
+      "borrower" in modal && modal.borrower
+        ? "แก้ไขข้อมูลผู้กู้"
+        : "เพิ่มผู้กู้",
+    loan: "เพิ่มสัญญาเงินกู้",
+    payment: "บันทึกรับชำระ",
+    payoff: "ปิดหนี้ตามวัน",
+    rate: "เปลี่ยนอัตราดอกเบี้ย",
+    adjustment: "ปรับปรุงยอด",
+    due: "เลื่อนวันนัดชำระ",
+    contact: "เตรียมข้อความติดตาม",
+    attachment: "แนบหลักฐาน",
+    "payment-attachment": "แนบสลิปการชำระ",
+    cancel: "ยกเลิกรายการ",
+    recovery: "เก็บรหัสกู้คืนของคุณ",
+  };
+  async function handle(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    const f = new FormData(event.currentTarget);
+    try {
+      if (modal.kind === "borrower")
+        await submit(
+          modal.borrower ? `/borrowers/${modal.borrower.id}` : "/borrowers",
+          {
+            name: field(f, "name"),
+            nickname: field(f, "nickname"),
+            phone: field(f, "phone"),
+            lineId: field(f, "lineId"),
+            facebookUrl: field(f, "facebookUrl"),
+            notes: field(f, "notes"),
+          },
+          modal.borrower ? "PATCH" : "POST",
+        );
+      else if (modal.kind === "loan") {
+        const startDate = field(f, "startDate");
+        const cycleStartDate =
+          source === "existing" ? field(f, "cycleStartDate") : startDate;
+        const anchorDay = Number(field(f, "anchorDay"));
+        await submit("/loans", {
+          borrowerId: field(f, "borrowerId"),
+          source,
+          principalCents: cents(f, "principal"),
+          openingInterestCents:
+            source === "existing" ? cents(f, "openingInterest") : 0,
+          rateBps: Math.round(Number(field(f, "rate")) * 100),
+          startDate,
+          cycleStartDate,
+          firstCycleEndDate:
+            source === "existing"
+              ? field(f, "firstCycleEndDate")
+              : addMonths(startDate, 1, anchorDay),
+          anchorDay,
+          dueDate: field(f, "dueDate"),
+          notes: field(f, "notes"),
+        });
+      } else if (modal.kind === "payment" || modal.kind === "payoff") {
+        const submittedDate = field(f, "date");
+        const submittedBalance = calculateLedger({
+          loan: modal.loan,
+          payments: data.payments,
+          rateChanges: data.rateChanges,
+          adjustments: data.adjustments,
+          asOf: submittedDate,
+        });
+        await submit("/payments", {
+          loanId: modal.loan.id,
+          date: submittedDate,
+          totalCents:
+            modal.kind === "payoff"
+              ? submittedBalance.payoffTotalCents
+              : cents(f, "total"),
+          principalCents:
+            modal.kind === "payoff"
+              ? submittedBalance.principalCents
+              : cents(f, "principal"),
+          interestCents:
+            modal.kind === "payoff"
+              ? submittedBalance.payoffInterestCents
+              : cents(f, "interest"),
+          note: field(f, "note"),
+          isPayoff: modal.kind === "payoff",
+        });
+      } else if (modal.kind === "rate")
+        await submit("/rate-changes", {
+          loanId: modal.loan.id,
+          effectiveDate: field(f, "effectiveDate"),
+          rateBps: Math.round(Number(field(f, "rate")) * 100),
+          reason: field(f, "reason"),
+        });
+      else if (modal.kind === "adjustment")
+        await submit("/adjustments", {
+          loanId: modal.loan.id,
+          date: field(f, "date"),
+          principalDeltaCents: cents(f, "principalDelta"),
+          interestDeltaCents: cents(f, "interestDelta"),
+          reason: field(f, "reason"),
+        });
+      else if (modal.kind === "due")
+        await submit(
+          `/loans/${modal.loan.id}`,
+          {
+            dueDate: field(f, "dueDate"),
+            notes: field(f, "notes"),
+            reason: field(f, "reason"),
+          },
+          "PATCH",
+        );
+      else if (modal.kind === "cancel")
+        await submit(modal.path, { reason: field(f, "reason") });
+      else if (modal.kind === "contact")
+        await submit("/contacts", { loanId: modal.loan.id, channel, message });
+      else if (
+        modal.kind === "attachment" ||
+        modal.kind === "payment-attachment"
+      ) {
+        const file = f.get("file");
+        if (file instanceof File && file.size)
+          await uploadOnly(file, {
+            loanId: modal.loan.id,
+            borrowerId: modal.loan.borrowerId,
+            ...(modal.kind === "payment-attachment"
+              ? { paymentId: modal.paymentId }
+              : {}),
+          });
+        else throw new Error("เลือกไฟล์หลักฐานก่อนบันทึก");
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "บันทึกไม่สำเร็จ");
+    }
+  }
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy && modal.kind !== "recovery") close();
+    };
+    window.addEventListener("keydown", handler);
+    const previous = document.activeElement;
+    const dialog = document.querySelector<HTMLElement>(".modal");
+    dialog?.focus();
+    return () => {
+      window.removeEventListener("keydown", handler);
+      if (previous instanceof HTMLElement) previous.focus();
+    };
+  }, [busy]);
+  return (
+    <div
+      className="modal-overlay"
+      onClick={(e) => {
+        if (e.target === e.currentTarget && !busy && modal.kind !== "recovery")
+          close();
+      }}
+    >
+      <section
+        className="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="modal-title"
+        tabIndex={-1}
+      >
+        <header>
+          <div>
+            <h2 id="modal-title">{titles[modal.kind]}</h2>
+            {borrower && <p>{borrower.name}</p>}
+          </div>
+          {modal.kind !== "recovery" && (
+            <button aria-label="ปิด" disabled={busy} onClick={close}>
+              <X />
+            </button>
+          )}
+        </header>
+        {modal.kind === "recovery" ? (
+          <div className="modal-content">
+            <p>
+              บันทึกรหัสนี้ในที่ปลอดภัย
+              ใช้ตั้งรหัสผ่านใหม่หากคุณเข้าใช้งานไม่ได้
+            </p>
+            <code className="recovery-code">{modal.code}</code>
+            <Button
+              secondary
+              onClick={() =>
+                void navigator.clipboard
+                  .writeText(modal.code)
+                  .then(() => setCopied(true))
+              }
+            >
+              <Copy />
+              {copied ? "คัดลอกแล้ว" : "คัดลอกรหัส"}
+            </Button>
+            <Button onClick={close}>เก็บรหัสแล้ว</Button>
+          </div>
+        ) : (
+          <form onSubmit={handle}>
+            <div className="modal-content">
+              {modal.kind === "borrower" && (
+                <div className="form-grid">
+                  <Input
+                    label="ชื่อจริง *"
+                    name="name"
+                    value={modal.borrower?.name}
+                    required
+                  />
+                  <Input
+                    label="ชื่อเรียก"
+                    name="nickname"
+                    value={modal.borrower?.nickname}
+                  />
+                  <Input
+                    label="เบอร์โทร"
+                    name="phone"
+                    type="tel"
+                    value={modal.borrower?.phone}
+                  />
+                  <Input
+                    label="LINE ID"
+                    name="lineId"
+                    value={modal.borrower?.lineId}
+                  />
+                  <Input
+                    label="ลิงก์ Facebook"
+                    name="facebookUrl"
+                    type="url"
+                    value={modal.borrower?.facebookUrl}
+                  />
+                  <Input
+                    label="หมายเหตุ"
+                    name="notes"
+                    value={modal.borrower?.notes}
+                  />
+                </div>
+              )}
+              {modal.kind === "loan" && (
+                <>
+                  <label className="field">
+                    ผู้กู้ *
+                    <select
+                      name="borrowerId"
+                      required
+                      defaultValue={modal.borrowerId || ""}
+                    >
+                      <option value="">เลือกผู้กู้</option>
+                      {data.borrowers.map((b) => (
+                        <option value={b.id} key={b.id}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  {!data.borrowers.length && (
+                    <p className="panel-note">
+                      ปิดหน้าต่างนี้ แล้วเพิ่มผู้กู้ในเมนูผู้กู้และสัญญาก่อน
+                    </p>
+                  )}
+                  <div className="segmented">
+                    <button
+                      type="button"
+                      className={source === "new" ? "selected" : ""}
+                      onClick={() => setSource("new")}
+                    >
+                      กู้ใหม่ / ยืมไม่มีดอก
+                    </button>
+                    <button
+                      type="button"
+                      className={source === "existing" ? "selected" : ""}
+                      onClick={() => setSource("existing")}
+                    >
+                      หนี้เดิมยกมา
+                    </button>
+                  </div>
+                  <div className="form-grid">
+                    <Input
+                      label={
+                        source === "existing"
+                          ? "ต้นคงเหลือยกมา (บาท) *"
+                          : "เงินต้น (บาท) *"
+                      }
+                      name="principal"
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      required
+                    />
+                    <Input
+                      label="ดอกเบี้ยต่อเดือน (%) *"
+                      name="rate"
+                      type="number"
+                      min="0"
+                      max={source === "new" ? "1.25" : undefined}
+                      step="0.01"
+                      value="0"
+                      hint={
+                        source === "new"
+                          ? "0% สำหรับยืมไม่มีดอก สูงสุดทั่วไป 1.25% ต่อเดือน"
+                          : "บันทึกอัตราตามหลักฐานหนี้เดิม"
+                      }
+                      required
+                    />
+                    <Input
+                      label={
+                        source === "existing"
+                          ? "วันที่เริ่มนับยอด *"
+                          : "วันที่ให้กู้ *"
+                      }
+                      name="startDate"
+                      type="date"
+                      value={todayBangkok()}
+                      max={todayBangkok()}
+                      required
+                    />
+                    <Input
+                      label="วันนัดชำระ *"
+                      name="dueDate"
+                      type="date"
+                      required
+                      value={addMonths(todayBangkok(), 1)}
+                    />
+                    <Input
+                      label="วันตัดรอบของเดือน *"
+                      name="anchorDay"
+                      type="number"
+                      min="1"
+                      max="31"
+                      step="1"
+                      value={Number(todayBangkok().slice(-2))}
+                      required
+                    />
+                    {source === "existing" && (
+                      <>
+                        <Input
+                          label="ดอกค้างถึงวันเริ่มนับยอด (บาท) *"
+                          name="openingInterest"
+                          type="number"
+                          step="0.01"
+                          min="0"
+                          value="0"
+                          required
+                        />
+                        <Input
+                          label="วันเริ่มรอบเดิม *"
+                          name="cycleStartDate"
+                          type="date"
+                          required
+                          hint="ขอบเขตต้นรอบก่อนวันยกยอด ใช้เป็นฐานจำนวนวันจริง"
+                        />
+                        <Input
+                          label="วันตัดรอบถัดไป *"
+                          name="firstCycleEndDate"
+                          type="date"
+                          required
+                        />
+                      </>
+                    )}
+                  </div>
+                  <Input label="หมายเหตุ / ข้อตกลง" name="notes" />
+                </>
+              )}
+              {(modal.kind === "payment" || modal.kind === "payoff") && (
+                <>
+                  <label className="field">
+                    วันที่รับชำระ *
+                    <input
+                      name="date"
+                      type="date"
+                      required
+                      value={paymentDate}
+                      min={loan?.startDate}
+                      max={todayBangkok()}
+                      onInput={(e) => setPaymentDate(e.currentTarget.value)}
+                      onChange={(e) => setPaymentDate(e.target.value)}
+                    />
+                  </label>
+                  {modal.kind === "payment" ? (
+                    <>
+                      <div className="form-grid">
+                        <Input
+                          label="ยอดรับเงินจริง (บาท) *"
+                          name="total"
+                          type="number"
+                          min="0.01"
+                          step="0.01"
+                          required
+                        />
+                        <Input
+                          label="คืนต้น (บาท) *"
+                          name="principal"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value="0"
+                          required
+                        />
+                        <Input
+                          label="ชำระดอก (บาท) *"
+                          name="interest"
+                          type="number"
+                          min="0"
+                          step="0.01"
+                          value="0"
+                          required
+                        />
+                      </div>
+                      <p className="panel-note">
+                        คืนต้น + ชำระดอก ต้องเท่ากับยอดรับจริง
+                        จ่ายเฉพาะดอกได้โดยคืนต้นเป็น 0
+                      </p>
+                    </>
+                  ) : (
+                    <div className="payoff-preview">
+                      <p>เงินต้น ฿{money(s?.principalCents || 0)}</p>
+                      <p>
+                        ดอกรวมถึงวันปิด ฿{money(s?.payoffInterestCents || 0)}
+                      </p>
+                      <strong>
+                        ยอดรับปิดหนี้ ฿{money(s?.payoffTotalCents || 0)}
+                      </strong>
+                      <small>
+                        คิดตามวันจริงในรอบ นับวันเริ่ม ไม่นับวันชำระ
+                      </small>
+                    </div>
+                  )}
+                  <Input label="หมายเหตุ" name="note" />
+                </>
+              )}
+              {modal.kind === "rate" && (
+                <>
+                  <div className="form-grid">
+                    <Input
+                      label="อัตราใหม่ต่อเดือน (%) *"
+                      name="rate"
+                      type="number"
+                      min="0"
+                      max={modal.loan.source === "new" ? "1.25" : undefined}
+                      step="0.01"
+                      required
+                    />
+                    <Input
+                      label="วันเริ่มงวดที่ใช้ *"
+                      name="effectiveDate"
+                      type="date"
+                      value={s?.currentCycleEndDate}
+                      required
+                    />
+                  </div>
+                  <p className="panel-note">
+                    มีผลที่วันเริ่มรอบถัดไป เก็บอัตราเดิมในประวัติ
+                    การแก้ย้อนหลังใช้ปรับปรุงยอด
+                  </p>
+                  <Input label="เหตุผล *" name="reason" required />
+                </>
+              )}
+              {modal.kind === "adjustment" && (
+                <>
+                  <Input
+                    label="วันที่ปรับยอด *"
+                    name="date"
+                    type="date"
+                    value={todayBangkok()}
+                    required
+                  />
+                  <div className="form-grid">
+                    <Input
+                      label="ปรับต้น (บาท) *"
+                      name="principalDelta"
+                      type="number"
+                      step="0.01"
+                      value="0"
+                      required
+                    />
+                    <Input
+                      label="ปรับดอก (บาท) *"
+                      name="interestDelta"
+                      type="number"
+                      step="0.01"
+                      value="0"
+                      required
+                    />
+                  </div>
+                  <p className="panel-note">
+                    ค่าบวกเพิ่มยอด ค่าลบลดยอด การปรับจะเก็บในประวัติ
+                  </p>
+                  <Input label="เหตุผล *" name="reason" required />
+                </>
+              )}
+              {modal.kind === "due" && (
+                <>
+                  <Input
+                    label="วันนัดชำระใหม่ *"
+                    name="dueDate"
+                    type="date"
+                    value={modal.loan.dueDate}
+                    required
+                  />
+                  <Input
+                    label="หมายเหตุ"
+                    name="notes"
+                    value={modal.loan.notes}
+                  />
+                  <Input label="เหตุผล *" name="reason" required />
+                  <p className="panel-note">การเลื่อนนัดไม่เปลี่ยนรอบคิดดอก</p>
+                </>
+              )}
+              {modal.kind === "cancel" && (
+                <>
+                  <p>
+                    รายการเดิมจะยังอยู่ในประวัติ
+                    และยอดจะคำนวณใหม่จากรายการที่มีผล
+                  </p>
+                  <Input label="เหตุผลที่ยกเลิก *" name="reason" required />
+                </>
+              )}
+              {(modal.kind === "attachment" ||
+                modal.kind === "payment-attachment") && (
+                <label className="field">
+                  ไฟล์หลักฐาน *
+                  <input
+                    type="file"
+                    name="file"
+                    accept="image/jpeg,image/png,image/webp,application/pdf"
+                    required
+                  />
+                  <small>รูปภาพหรือ PDF ไม่เกิน 10 MB</small>
+                </label>
+              )}
+              {modal.kind === "contact" && (
+                <>
+                  <div className="segmented">
+                    <button
+                      type="button"
+                      className={channel === "LINE" ? "selected" : ""}
+                      onClick={() => setChannel("LINE")}
+                    >
+                      LINE
+                    </button>
+                    <button
+                      type="button"
+                      className={channel === "Facebook" ? "selected" : ""}
+                      onClick={() => setChannel("Facebook")}
+                    >
+                      Facebook
+                    </button>
+                  </div>
+                  <label className="field">
+                    ตรวจและปรับข้อความ
+                    <textarea
+                      rows={6}
+                      value={message}
+                      onChange={(e) => setMessage(e.target.value)}
+                      required
+                    />
+                  </label>
+                  <div className="actions-wrap">
+                    <Button
+                      secondary
+                      onClick={() =>
+                        void navigator.clipboard
+                          .writeText(message)
+                          .then(() => setCopied(true))
+                          .catch(() =>
+                            setError(
+                              "คัดลอกไม่ได้ โปรดเลือกข้อความและคัดลอกเอง",
+                            ),
+                          )
+                      }
+                    >
+                      {copied ? <Check /> : <Copy />}
+                      {copied ? "คัดลอกแล้ว" : "คัดลอกข้อความ"}
+                    </Button>
+                    {channel === "Facebook" && borrower?.facebookUrl && (
+                      <a
+                        className="button secondary"
+                        href={borrower.facebookUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        เปิด Facebook
+                      </a>
+                    )}
+                    {channel === "LINE" && (
+                      <a
+                        className="button secondary"
+                        href="https://line.me/"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        เปิด LINE
+                      </a>
+                    )}
+                  </div>
+                  <p className="panel-note">
+                    หลังส่งด้วยบัญชีส่วนตัวแล้ว จึงกด "ส่งแล้ว"
+                    การคัดลอกยังไม่บันทึกว่าส่ง
+                  </p>
+                </>
+              )}
+              {error && (
+                <p className="error" role="alert">
+                  {error}
+                </p>
+              )}
+            </div>
+            <footer>
+              <Button secondary onClick={close} disabled={busy}>
+                ยกเลิก
+              </Button>
+              <Button
+                type="submit"
+                disabled={
+                  busy || (modal.kind === "loan" && !data.borrowers.length)
+                }
+              >
+                {busy
+                  ? "กำลังบันทึก…"
+                  : modal.kind === "contact"
+                    ? "ส่งแล้ว บันทึกประวัติ"
+                    : modal.kind === "payoff"
+                      ? "ยืนยันรับเงินปิดหนี้"
+                      : "บันทึก"}
+              </Button>
+            </footer>
+          </form>
+        )}
+      </section>
+    </div>
+  );
+}
