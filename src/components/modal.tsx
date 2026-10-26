@@ -1,18 +1,42 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Copy, Check, X } from "lucide-react";
 import { calculateLedger, addMonths, todayBangkok } from "../domain/ledger";
+import { loanDisplayName } from "../domain/loan-name";
+import type { LoanRecordAction } from "../domain/loan-records";
+const recordActionTitles: Record<LoanRecordAction, string> = {
+  "mark-test": "ย้ายเป็นสัญญาทดลอง",
+  "mark-real": "เปลี่ยนเป็นสัญญาจริง",
+  "trash-test": "ลบสัญญาทดลอง",
+  "restore-test": "กู้คืนสัญญาทดลอง",
+};
 import type {
   Borrower,
   Loan,
   LedgerData,
   LedgerSnapshot,
+  Payment,
 } from "../domain/types";
 import { Button, Input, money, date, field, cents } from "./ui";
+function MonthlyRateInput({ label, value, onChange }: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+}) {
+  return <label className="field">{label}
+    <input name="rate" type="number" min="0" step="0.01" required value={value} onChange={e => onChange(e.target.value)} />
+    <small>10% ให้กรอก 10 · 7.5% ให้กรอก 7.5 · ไม่มีดอกกรอก 0</small>
+    {Number(value) > 1.25 && <small>
+      บันทึกอัตราตามจริง การบันทึกไม่รับรองสิทธิเรียกเก็บดอก อัตราทั่วไปสำหรับบุคคลธรรมดาไม่เกิน 15% ต่อปี (เฉลี่ย 1.25% ต่อเดือน) · <a href="https://personal.prd.go.th/th/content/category/detail/id/1824/cid/1825/iid/296636" target="_blank" rel="noreferrer">ข้อมูลจากกรมประชาสัมพันธ์</a>
+    </small>}
+  </label>;
+}
 export type Modal =
+  | { kind: "loan-record"; loan: Loan; action: LoanRecordAction }
   | { kind: "borrower"; borrower?: Borrower }
   | { kind: "loan"; borrowerId?: string }
+  | { kind: "edit-payment"; loan: Loan; payment: Payment }
   | {
-      kind: "payment" | "payoff" | "rate" | "adjustment" | "due" | "contact";
+      kind: "payment" | "payoff" | "rate" | "adjustment" | "loan-correction" | "loan-purpose" | "contact";
       loan: Loan;
     }
   | { kind: "attachment"; loan: Loan }
@@ -42,9 +66,11 @@ export function ModalView({
   ) => Promise<void>;
   uploadOnly: (file: File, ids: Record<string, string>) => Promise<void>;
 }) {
+  const editingPayment = modal.kind === "edit-payment" ? modal.payment : undefined;
   const [error, setError] = useState("");
   const [source, setSource] = useState("new");
-  const [paymentDate, setPaymentDate] = useState(todayBangkok());
+  const [paymentDate, setPaymentDate] = useState(editingPayment?.date ?? todayBangkok());
+  const [dateEstimated, setDateEstimated] = useState(editingPayment?.dateEstimated ?? false);
   const [copied, setCopied] = useState(false);
   const [channel, setChannel] = useState<"LINE" | "Facebook">("LINE");
   const loan = "loan" in modal ? modal.loan : undefined;
@@ -54,7 +80,7 @@ export function ModalView({
   const s = loan
     ? calculateLedger({
         loan,
-        payments: data.payments,
+        payments: data.payments.filter(p => p.id !== editingPayment?.id),
         rateChanges: data.rateChanges,
         adjustments: data.adjustments,
         asOf:
@@ -63,22 +89,35 @@ export function ModalView({
             : loan.startDate,
       })
     : undefined;
+  const [ratePercent, setRatePercent] = useState(() =>
+    loan ? String((modal.kind === "loan-correction" ? loan.rateBps : s?.currentRateBps ?? loan.rateBps) / 100) : "0",
+  );
+  const [remainingPrincipal, setRemainingPrincipal] = useState(() => loan ? String((snapshots.get(loan.id)?.principalCents ?? loan.principalCents) / 100) : "");
+  const [purpose, setPurpose] = useState(loan?.purpose ?? "");
+  const [payoffInterest, setPayoffInterest] = useState("");
+  const futureRates = loan ? data.rateChanges.filter(r => r.loanId === loan.id && !r.canceledAt && r.effectiveDate > todayBangkok()) : [];
+  const availableRateDates = loan && s && modal.kind === "rate"
+    ? Array.from({ length: 24 }, (_, index) => addMonths(s.currentCycleEndDate, index, loan.anchorDay))
+      .filter(day => !futureRates.some(r => r.effectiveDate === day)) : [];
   const [message, setMessage] = useState(
     loan
-      ? `สวัสดี ${borrower?.nickname || borrower?.name} ขอแจ้งวันนัดชำระ ${date(loan.dueDate)} สำหรับรายการกู้ ${loan.id.slice(0, 8)} ดอกค้าง ${money(snapshots.get(loan.id)?.interestCents || 0)} บาท เงินต้นคงเหลือ ${money(snapshots.get(loan.id)?.principalCents || 0)} บาท หากชำระแล้วส่งหลักฐานให้ตรวจสอบได้ ขอบคุณครับ/ค่ะ`
+      ? `สวัสดี ${loanDisplayName(borrower?.nickname || borrower?.name || "ผู้กู้", loan)} ขอแจ้งวันนัดชำระ ${date(loan.dueDate)} สำหรับรายการกู้ ${loan.id.slice(0, 8)} เงินต้นคงเหลือ ${money(snapshots.get(loan.id)?.principalCents || 0)} บาท หากชำระแล้วส่งหลักฐานให้ตรวจสอบได้ ขอบคุณครับ/ค่ะ`
       : "",
   );
   const titles = {
+    "loan-record": modal.kind === "loan-record" ? recordActionTitles[modal.action] : "จัดหมวดสัญญา",
     borrower:
       "borrower" in modal && modal.borrower
         ? "แก้ไขข้อมูลผู้กู้"
         : "เพิ่มผู้กู้",
     loan: "เพิ่มสัญญาเงินกู้",
     payment: "บันทึกรับชำระ",
-    payoff: "ปิดหนี้ตามวัน",
-    rate: "เปลี่ยนอัตราดอกเบี้ย",
-    adjustment: "ปรับปรุงยอด",
-    due: "เลื่อนวันนัดชำระ",
+    "edit-payment": "แก้ไขรับชำระ",
+    payoff: "บันทึกรับเงินปิดหนี้",
+    rate: "เปลี่ยนอัตรางวดถัดไป",
+    adjustment: "เพิ่ม/ลดยอด (ขั้นสูง)",
+    "loan-correction": "แก้ต้น / ดอก / วันนัด",
+    "loan-purpose": "ตั้งชื่อรายการกู้",
     contact: "เตรียมข้อความติดตาม",
     attachment: "แนบหลักฐาน",
     "payment-attachment": "แนบสลิปการชำระ",
@@ -111,6 +150,7 @@ export function ModalView({
         await submit("/loans", {
           borrowerId: field(f, "borrowerId"),
           source,
+          isTest: f.get("isTest") === "on",
           principalCents: cents(f, "principal"),
           openingInterestCents:
             source === "existing" ? cents(f, "openingInterest") : 0,
@@ -123,35 +163,36 @@ export function ModalView({
               : addMonths(startDate, 1, anchorDay),
           anchorDay,
           dueDate: field(f, "dueDate"),
+          purpose: field(f, "purpose"),
           notes: field(f, "notes"),
         });
-      } else if (modal.kind === "payment" || modal.kind === "payoff") {
-        const submittedDate = field(f, "date");
+      } else if (modal.kind === "payment" || modal.kind === "edit-payment" || modal.kind === "payoff") {
+        const submittedDate = dateEstimated && modal.kind !== "payoff" ? paymentDate : field(f, "date");
         const submittedBalance = calculateLedger({
           loan: modal.loan,
-          payments: data.payments,
+          payments: data.payments.filter(p => p.id !== editingPayment?.id),
           rateChanges: data.rateChanges,
           adjustments: data.adjustments,
           asOf: submittedDate,
         });
-        await submit("/payments", {
+        await submit(editingPayment ? `/payments/${editingPayment.id}` : "/payments", {
           loanId: modal.loan.id,
           date: submittedDate,
+          dateEstimated: modal.kind !== "payoff" && dateEstimated,
           totalCents:
             modal.kind === "payoff"
-              ? submittedBalance.payoffTotalCents
+              ? submittedBalance.principalCents + cents(f, "interest")
               : cents(f, "total"),
           principalCents:
             modal.kind === "payoff"
               ? submittedBalance.principalCents
               : cents(f, "principal"),
-          interestCents:
-            modal.kind === "payoff"
-              ? submittedBalance.payoffInterestCents
-              : cents(f, "interest"),
+          interestCents: cents(f, "interest"),
           note: field(f, "note"),
-          isPayoff: modal.kind === "payoff",
-        });
+          isPayoff: modal.kind === "payoff" || editingPayment?.isPayoff === true,
+          ...((modal.kind === "payoff" || editingPayment?.isPayoff) ? { payoffMode: "owner" } : {}),
+          ...(editingPayment ? { editReason: field(f, "editReason") } : {}),
+        }, editingPayment ? "PATCH" : "POST");
       } else if (modal.kind === "rate")
         await submit("/rate-changes", {
           loanId: modal.loan.id,
@@ -167,16 +208,22 @@ export function ModalView({
           interestDeltaCents: cents(f, "interestDelta"),
           reason: field(f, "reason"),
         });
-      else if (modal.kind === "due")
+      else if (modal.kind === "loan-correction")
         await submit(
-          `/loans/${modal.loan.id}`,
+          `/loans/${modal.loan.id}/correction`,
           {
+            rateBps: Math.round(Number(field(f, "rate")) * 100),
+            remainingPrincipalCents: cents(f, "remainingPrincipal"),
             dueDate: field(f, "dueDate"),
-            notes: field(f, "notes"),
             reason: field(f, "reason"),
+            cancelRateChangeIds: f.getAll("cancelRateChangeIds").map(String),
           },
-          "PATCH",
+          "POST",
         );
+      else if (modal.kind === "loan-record")
+        await submit(`/loans/${modal.loan.id}/record-status`, { action: modal.action, reason: field(f, "reason") });
+      else if (modal.kind === "loan-purpose")
+        await submit(`/loans/${modal.loan.id}`, { purpose: field(f, "purpose"), reason: "เจ้าของตั้งชื่อรายการกู้" }, "PATCH");
       else if (modal.kind === "cancel")
         await submit(modal.path, { reason: field(f, "reason") });
       else if (modal.kind === "contact")
@@ -231,7 +278,8 @@ export function ModalView({
         <header>
           <div>
             <h2 id="modal-title">{titles[modal.kind]}</h2>
-            {borrower && <p>{borrower.name}</p>}
+            {borrower && <p>{loan ? loanDisplayName(borrower.name, loan) : borrower.name}</p>}
+            {loan && <small className="modal-loan-context">ต้นเริ่มบันทึก ฿{money(loan.principalCents)} · นัดชำระ {date(loan.dueDate)}</small>}
           </div>
           {modal.kind !== "recovery" && (
             <button aria-label="ปิด" disabled={busy} onClick={close}>
@@ -337,6 +385,10 @@ export function ModalView({
                       หนี้เดิมยกมา
                     </button>
                   </div>
+                  <label className="payment-date-unknown">
+                    <input type="checkbox" name="isTest" />
+                    สัญญาทดลอง · ไม่นับต้น ดอก เงินรับ หรือยอดคาดการณ์ในบัญชีจริง
+                  </label>
                   <div className="form-grid">
                     <Input
                       label={
@@ -350,20 +402,10 @@ export function ModalView({
                       min="0.01"
                       required
                     />
-                    <Input
+                    <MonthlyRateInput
                       label="ดอกเบี้ยต่อเดือน (%) *"
-                      name="rate"
-                      type="number"
-                      min="0"
-                      max={source === "new" ? "1.25" : undefined}
-                      step="0.01"
-                      value="0"
-                      hint={
-                        source === "new"
-                          ? "0% สำหรับยืมไม่มีดอก สูงสุดทั่วไป 1.25% ต่อเดือน"
-                          : "บันทึกอัตราตามหลักฐานหนี้เดิม"
-                      }
-                      required
+                      value={ratePercent}
+                      onChange={setRatePercent}
                     />
                     <Input
                       label={
@@ -397,7 +439,7 @@ export function ModalView({
                     {source === "existing" && (
                       <>
                         <Input
-                          label="ดอกค้างถึงวันเริ่มนับยอด (บาท) *"
+                          label="ดอกยกมาที่คุณระบุเอง (บาท) *"
                           name="openingInterest"
                           type="number"
                           step="0.01"
@@ -421,10 +463,11 @@ export function ModalView({
                       </>
                     )}
                   </div>
+                  <Input label="ชื่อรายการ / กู้ไปเพื่ออะไร" name="purpose" hint="เช่น ค่าเหล้า, คอนเนคชั่นเอาไปปล่อยต่อ, กู้เอง" />
                   <Input label="หมายเหตุ / ข้อตกลง" name="notes" />
                 </>
               )}
-              {(modal.kind === "payment" || modal.kind === "payoff") && (
+              {(modal.kind === "payment" || modal.kind === "edit-payment" || modal.kind === "payoff") && (
                 <>
                   <label className="field">
                     วันที่รับชำระ *
@@ -432,6 +475,7 @@ export function ModalView({
                       name="date"
                       type="date"
                       required
+                      disabled={modal.kind !== "payoff" && dateEstimated}
                       value={paymentDate}
                       min={loan?.startDate}
                       max={todayBangkok()}
@@ -439,8 +483,22 @@ export function ModalView({
                       onChange={(e) => setPaymentDate(e.target.value)}
                     />
                   </label>
-                  {modal.kind === "payment" ? (
+                  {modal.kind !== "payoff" ? (
                     <>
+                      <label className="payment-date-unknown">
+                        <input type="checkbox" checked={dateEstimated} onChange={(event) => {
+                          setDateEstimated(event.target.checked);
+                          if (event.target.checked) setPaymentDate(todayBangkok());
+                        }} />
+                        จำวันที่จ่ายจริงไม่ได้ ใช้วันที่บันทึกและระบุไว้ในประวัติ
+                      </label>
+                      <div className="payment-interest-context" role="status">
+                        <p>ดอกตามสูตรในรอบที่เลือก สำหรับอ้างอิง</p>
+                        <strong>฿{money(s?.cycleInterest.earnedInterestCents || 0)}</strong>
+                        <small>เป็นดอกของรอบนี้ตามสูตร ไม่ใช่ยอดที่บังคับเรียกเก็บ</small>
+                        <small>คุณระบุยอดดอกที่รับจริงเองได้ ไม่จำกัดตามยอดคำนวณ · ไม่มีค่าปรับอัตโนมัติ</small>
+                        <small>ส่วนที่รับเกินยอดสูตรเป็นดอกรับตามตกลง ไม่เป็นเครดิตหักดอกล่วงหน้า</small>
+                      </div>
                       <div className="form-grid">
                         <Input
                           label="ยอดรับเงินจริง (บาท) *"
@@ -448,6 +506,7 @@ export function ModalView({
                           type="number"
                           min="0.01"
                           step="0.01"
+                          value={editingPayment ? editingPayment.totalCents / 100 : undefined}
                           required
                         />
                         <Input
@@ -456,7 +515,7 @@ export function ModalView({
                           type="number"
                           min="0"
                           step="0.01"
-                          value="0"
+                          value={editingPayment ? editingPayment.principalCents / 100 : "0"}
                           required
                         />
                         <Input
@@ -465,55 +524,50 @@ export function ModalView({
                           type="number"
                           min="0"
                           step="0.01"
-                          value="0"
+                          value={editingPayment ? editingPayment.interestCents / 100 : "0"}
                           required
                         />
                       </div>
                       <p className="panel-note">
                         คืนต้น + ชำระดอก ต้องเท่ากับยอดรับจริง
-                        จ่ายเฉพาะดอกได้โดยคืนต้นเป็น 0
+                        จ่ายเฉพาะดอกได้โดยคืนต้นเป็น 0 ยอดดอกให้กรอกตามที่คุณรับจริง
                       </p>
                     </>
                   ) : (
                     <div className="payoff-preview">
                       <p>เงินต้น ฿{money(s?.principalCents || 0)}</p>
-                      <p>
-                        ดอกรวมถึงวันปิด ฿{money(s?.payoffInterestCents || 0)}
-                      </p>
+                      <label className="field">ดอกที่รับจริงตอนปิดหนี้ (บาท) *
+                        <input name="interest" type="number" min="0" step="0.01" required value={payoffInterest} onChange={e => setPayoffInterest(e.target.value)} />
+                        <small>กรอกยอดที่ได้รับจริง ไม่มีดอกให้กรอก 0 ระบบจะไม่เติมดอกจากสูตรแทนคุณ</small>
+                      </label>
                       <strong>
-                        ยอดรับปิดหนี้ ฿{money(s?.payoffTotalCents || 0)}
+                        {payoffInterest === "" ? "กรอกดอกที่รับจริงเพื่อดูยอดรวม" : `ยอดรับปิดหนี้ ฿${money((s?.principalCents || 0) + Math.round(Number(payoffInterest) * 100))}`}
                       </strong>
                       <small>
-                        คิดตามวันจริงในรอบ นับวันเริ่ม ไม่นับวันชำระ
+                        ปิดหนี้โดยใช้ดอกที่คุณระบุ ดอกตามสูตรที่ไม่ได้เรียกเก็บจะไม่ถูกนับเป็นเงินรับจริง
                       </small>
                     </div>
                   )}
-                  <Input label="หมายเหตุ" name="note" />
+                  <Input label="หมายเหตุ" name="note" value={editingPayment?.note} />
+                  {editingPayment && <>
+                    <Input label="เหตุผลที่แก้ไข (ไม่บังคับ)" name="editReason" />
+                    <p className="panel-note">เก็บรายการเดิมเป็นประวัติ และใช้รายการที่แก้ไขคำนวณยอดแทน</p>
+                  </>}
                 </>
               )}
               {modal.kind === "rate" && (
                 <>
                   <div className="form-grid">
-                    <Input
-                      label="อัตราใหม่ต่อเดือน (%) *"
-                      name="rate"
-                      type="number"
-                      min="0"
-                      max={modal.loan.source === "new" ? "1.25" : undefined}
-                      step="0.01"
-                      required
-                    />
-                    <Input
-                      label="วันเริ่มงวดที่ใช้ *"
-                      name="effectiveDate"
-                      type="date"
-                      value={s?.currentCycleEndDate}
-                      required
-                    />
+                    <MonthlyRateInput label="อัตราใหม่ต่อเดือน (%) *" value={ratePercent} onChange={setRatePercent} />
+                    <label className="field">เริ่มใช้อัตราใหม่ในงวด *
+                      <select name="effectiveDate" required defaultValue={availableRateDates[0]}>
+                        {availableRateDates.map(day => <option key={day} value={day}>{date(day)}</option>)}
+                      </select>
+                      <small>แสดงเฉพาะวันเริ่มรอบที่ยังไม่ได้ตั้งอัตราไว้</small>
+                    </label>
                   </div>
                   <p className="panel-note">
-                    มีผลที่วันเริ่มรอบถัดไป เก็บอัตราเดิมในประวัติ
-                    การแก้ย้อนหลังใช้ปรับปรุงยอด
+                    ใช้สำหรับตกลงอัตราใหม่ในอนาคต หากกรอกอัตราเดิมผิด ให้ปิดหน้านี้แล้วเลือก “แก้ต้น / ดอก / วันนัด”
                   </p>
                   <Input label="เหตุผล *" name="reason" required />
                 </>
@@ -529,15 +583,16 @@ export function ModalView({
                   />
                   <div className="form-grid">
                     <Input
-                      label="ปรับต้น (บาท) *"
+                      label="จำนวนต้นที่จะเพิ่ม/ลด (บาท) *"
                       name="principalDelta"
                       type="number"
                       step="0.01"
                       value="0"
+                      hint="เป็นส่วนต่าง: ใส่ -40000 เพื่อลดจาก 60000 เหลือ 20000"
                       required
                     />
                     <Input
-                      label="ปรับดอก (บาท) *"
+                      label="จำนวนดอกที่จะเพิ่ม/ลด (บาท) *"
                       name="interestDelta"
                       type="number"
                       step="0.01"
@@ -546,27 +601,66 @@ export function ModalView({
                     />
                   </div>
                   <p className="panel-note">
-                    ค่าบวกเพิ่มยอด ค่าลบลดยอด การปรับจะเก็บในประวัติ
+                    ช่องนี้รับจำนวนที่จะเพิ่มหรือลด หากต้องการใส่ยอดสุดท้าย ให้เลือก “แก้ต้น / ดอก / วันนัด” แทน ค่าบวกเพิ่มยอด ค่าลบลดยอด
                   </p>
                   <Input label="เหตุผล *" name="reason" required />
                 </>
               )}
-              {modal.kind === "due" && (
+              {modal.kind === "loan-correction" && (
                 <>
+                  <p className="panel-note">แก้ข้อมูลที่กรอกผิด โดยใช้อัตราที่ถูกต้องตั้งแต่วันเริ่มบันทึก เก็บค่าเดิมและเหตุผลไว้ในประวัติ</p>
+                  <label className="field">เงินต้นคงเหลือที่ถูกต้อง (บาท) *
+                    <input name="remainingPrincipal" type="number" min="0" step="0.01" required value={remainingPrincipal} onChange={e => setRemainingPrincipal(e.target.value)} />
+                    <small>กรอกยอดสุดท้ายที่ต้องการ เช่น 20000 เมื่อต้องเหลือต้น 20,000 บาท</small>
+                  </label>
+                  <p className="panel-note">ต้นคงเหลือปัจจุบัน ฿{money(snapshots.get(modal.loan.id)?.principalCents ?? modal.loan.principalCents)} → ยอดที่ต้องการ ฿{money(Math.round(Number(remainingPrincipal) * 100) || 0)}
+                    <br />การแก้ต้นจะเก็บรายการปรับส่วนต่าง ณ วันนี้ ไม่บันทึกเป็นเงินรับชำระ</p>
+                  <MonthlyRateInput label="อัตราดอกที่ถูกต้องต่อเดือน (%) *" value={ratePercent} onChange={setRatePercent} />
+                  <div className="payment-interest-context" role="status">
+                    <p>ตัวอย่างดอกเต็มเดือนจากต้นที่ระบุ ฿{money(Math.round(Number(remainingPrincipal) * 100) || 0)}</p>
+                    <strong>{Number.isFinite(Number(ratePercent)) && Number(ratePercent) >= 0
+                      ? `${Number(ratePercent)}% = ฿${money(Math.round(Number(remainingPrincipal) * Number(ratePercent)) || 0)}` : "กรอกอัตราที่ถูกต้อง"}</strong>
+                  </div>
                   <Input
                     label="วันนัดชำระใหม่ *"
                     name="dueDate"
                     type="date"
                     value={modal.loan.dueDate}
+                    min={modal.loan.startDate}
                     required
                   />
-                  <Input
-                    label="หมายเหตุ"
-                    name="notes"
-                    value={modal.loan.notes}
-                  />
+                  {futureRates.length > 0 && <div className="panel-note">
+                    <p>มีอัตราที่ตั้งไว้ล่วงหน้า หากตั้งผิด ให้เลือกยกเลิกรายการนั้นด้วย</p>
+                    {futureRates.map(r => <label className="payment-date-unknown" key={r.id}>
+                      <input type="checkbox" name="cancelRateChangeIds" value={r.id} />
+                      ยกเลิกอัตรา {r.rateBps / 100}% วันที่ {date(r.effectiveDate)}
+                    </label>)}
+                  </div>}
                   <Input label="เหตุผล *" name="reason" required />
-                  <p className="panel-note">การเลื่อนนัดไม่เปลี่ยนรอบคิดดอก</p>
+                  <p className="panel-note">เปลี่ยนวันนัดชำระได้ แต่รอบตัดดอกยังเดิม รายการที่ตั้งอัตราล่วงหน้าไว้จะยังใช้ตามเดิมหากไม่ได้เลือกยกเลิก</p>
+                </>
+              )}
+              {modal.kind === "loan-record" && <>
+                <p className="panel-note">
+                  {modal.action === "mark-real"
+                    ? "สัญญานี้และประวัติรับชำระทั้งหมดจะกลับมานับในยอดบัญชีจริง"
+                    : modal.action === "trash-test"
+                      ? "ย้ายสัญญาทดลองพร้อมประวัติไปถังขยะ ไม่นับในยอดบัญชีจริง และกู้คืนเป็นสัญญาทดลองได้"
+                      : "สัญญานี้และประวัติรับชำระทั้งหมดเป็นข้อมูลทดลอง ไม่นับต้น ดอก เงินรับ ยอดคาดการณ์ หรือรายการเตือนในบัญชีจริง"}
+                </p>
+                <Input label="เหตุผล *" name="reason" required value={modal.action === "mark-test" ? "เจ้าของระบุว่าเป็นข้อมูลทดลอง" : modal.action === "trash-test" ? "ลบสัญญาที่ใช้ทดลอง" : "เจ้าของเปลี่ยนหมวดสัญญา"} />
+              </>}
+              {modal.kind === "loan-purpose" && (
+                <>
+                  <label className="field">ชื่อรายการ / กู้ไปเพื่ออะไร
+                    <input name="purpose" maxLength={200} value={purpose} onChange={e => setPurpose(e.target.value)} />
+                    <small>กรอกเฉพาะข้อความในวงเล็บ เช่น ค่าเหล้า, คอนเนคชั่นเอาไปปล่อยต่อ หรือกู้เอง เว้นว่างเพื่อลบชื่อรายการ</small>
+                  </label>
+                  <div className="payment-interest-context" role="status">
+                    <p>ตัวอย่างชื่อที่จะแสดง</p>
+                    <strong>{loanDisplayName(borrower?.name || "ผู้กู้", { purpose })}</strong>
+                  </div>
+                  <p className="panel-note">ชื่อนี้ใช้เฉพาะสัญญานี้ ยอดเงินและผู้กู้ยังเป็นคนเดิม</p>
                 </>
               )}
               {modal.kind === "cancel" && (
@@ -618,6 +712,7 @@ export function ModalView({
                       required
                     />
                   </label>
+                  <p className="panel-note">หากต้องการแจ้งยอดดอก ให้พิมพ์ยอดที่คุณตกลงเรียกเก็บในข้อความเอง</p>
                   <div className="actions-wrap">
                     <Button
                       secondary
@@ -662,28 +757,32 @@ export function ModalView({
                   </p>
                 </>
               )}
+            </div>
+            <footer>
               {error && (
-                <p className="error" role="alert">
+                <p className="error modal-error" role="alert">
                   {error}
                 </p>
               )}
-            </div>
-            <footer>
               <Button secondary onClick={close} disabled={busy}>
                 ยกเลิก
               </Button>
               <Button
                 type="submit"
                 disabled={
-                  busy || (modal.kind === "loan" && !data.borrowers.length)
+                  busy || (modal.kind === "loan" && !data.borrowers.length) || (modal.kind === "payoff" && payoffInterest === "")
                 }
               >
                 {busy
                   ? "กำลังบันทึก…"
                   : modal.kind === "contact"
                     ? "ส่งแล้ว บันทึกประวัติ"
+                    : modal.kind === "loan-record"
+                      ? recordActionTitles[modal.action]
                     : modal.kind === "payoff"
                       ? "ยืนยันรับเงินปิดหนี้"
+                    : modal.kind === "edit-payment"
+                      ? "บันทึกการแก้ไข"
                       : "บันทึก"}
               </Button>
             </footer>

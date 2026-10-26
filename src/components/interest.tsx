@@ -1,6 +1,7 @@
 import type { InterestForecast, LedgerData, Loan } from "../domain/types";
 import { date, money } from "./ui";
 import { useState } from "react";
+import { loanDisplayName } from "../domain/loan-name";
 
 export function InterestOverview({ data, forecasts, select, today }: {
   data: LedgerData; forecasts: Map<string, InterestForecast>;
@@ -20,20 +21,24 @@ export function InterestOverview({ data, forecasts, select, today }: {
     }), { earned: 0, full: 0, month: 0 });
     return [{ borrower, items, amounts }];
   });
-  const visiblePeople = people.filter(({ borrower }) =>
-    `${borrower.name} ${borrower.nickname}`.includes(search.trim()),
+  const visiblePeople = people.filter(({ borrower, items }) =>
+    `${borrower.name} ${borrower.nickname} ${items.map(({ loan }) => loan.purpose || "").join(" ")}`.includes(search.trim()),
   );
-  const totals = [...forecasts.values()].reduce((sum, item) => ({
+  const visibleForecasts = data.loans.flatMap(loan => {
+    const forecast = forecasts.get(loan.id);
+    return forecast ? [forecast] : [];
+  });
+  const totals = visibleForecasts.reduce((sum, item) => ({
     earned: sum.earned + item.month.earnedInterestCents,
     full: sum.full + (item.cycle.accruing ? item.cycle.fullInterestCents : 0),
     forecast: sum.forecast + item.month.forecastInterestCents,
     additional: sum.additional + item.month.additionalInterestCents,
   }), { earned: 0, full: 0, forecast: 0, additional: 0 });
-  const monthEnd = forecasts.values().next().value?.month.endDate;
+  const monthEnd = visibleForecasts[0]?.month.endDate;
   return <section className="panel interest-panel">
     <div className="panel-heading"><h2>ดอกแยกรายคน</h2><span className="interest-date">ณ {date(today)}</span></div>
     <div className="interest-people-tools">
-      <p>{people.length} คน · ดอกถึงวันนี้และคาดการณ์ถึง {monthEnd ? date(monthEnd) : "สิ้นเดือน"}</p>
+      <p>{people.length} คน · เฉพาะสัญญากำลังชำระ · คาดการณ์ถึง {monthEnd ? date(monthEnd) : "สิ้นเดือน"}</p>
       <input aria-label="ค้นหาผู้กู้ในดอกรายคน" placeholder="ค้นหาชื่อผู้กู้" value={search} onChange={(event) => setSearch(event.target.value)} />
     </div>
     <div className="interest-people">
@@ -51,7 +56,7 @@ export function InterestOverview({ data, forecasts, select, today }: {
             <summary>ดูสูตรและรายการกู้ของ{borrower.name}</summary>
             {items.map(({ loan, forecast }) => (
               <div className="interest-person-loan" key={loan.id}>
-                <button className="interest-loan" onClick={() => select(loan.id)}>เปิดรายการ · ต้นเริ่ม ฿{money(loan.principalCents)}</button>
+                <button className="interest-loan" onClick={() => select(loan.id)}>{loanDisplayName(borrower.name, loan)} · ต้นเริ่ม ฿{money(loan.principalCents)}</button>
                 <p>{forecast.cycle.accruing ? `ดอกเต็มรอบ ฿${money(forecast.cycle.fullInterestCents)} ÷ ${forecast.cycle.fullDays} วัน × ${forecast.cycle.elapsedDays} วัน` : "หยุดคิดดอกแล้ว"} = ฿{money(forecast.cycle.earnedInterestCents)}</p>
                 <p>ครบงวด {date(forecast.cycle.endDate)} คาดการณ์ ฿{money(forecast.cycle.forecastInterestCents)}</p>
                 <p>สิ้นเดือน ฿{money(forecast.month.forecastInterestCents)} · เริ่มนับ {date(forecast.cycle.chargeStartDate)}</p>
@@ -80,7 +85,7 @@ export function InterestOverview({ data, forecasts, select, today }: {
           if (!item) return null;
           const borrower = data.borrowers.find((person) => person.id === loan.borrowerId);
           return <tr key={loan.id}>
-            <td><button className="interest-loan" onClick={() => select(loan.id)}>{borrower?.name || "ผู้กู้"}</button><small>ต้นเริ่ม ฿{money(loan.principalCents)}</small></td>
+            <td><button className="interest-loan" onClick={() => select(loan.id)}>{loanDisplayName(borrower?.name || "ผู้กู้", loan)}</button><small>ต้นเริ่ม ฿{money(loan.principalCents)}</small></td>
             <td>{item.cycle.elapsedDays} / {item.cycle.fullDays} วัน<small>ถึง {date(item.cycle.endDate)}</small></td>
             <td>฿{money(item.cycle.earnedInterestCents)}</td>
             <td>{item.cycle.accruing ? `฿${money(item.cycle.fullInterestCents)}` : "หยุดคิดดอกแล้ว"}</td>
@@ -104,7 +109,7 @@ export function InterestDetail({ forecast, loan }: { forecast: InterestForecast;
       <div className="interest-projection"><p>คาดการณ์ดอกเดือนนี้</p><strong>฿{money(month.forecastInterestCents)}</strong><small>รวมถึง {date(month.endDate)}</small></div>
     </div>
     <p className="interest-formula">ดอกเต็มรอบ ฿{money(cycle.fullInterestCents)} ÷ {cycle.fullDays} วัน × {cycle.elapsedDays} วันที่ผ่าน</p>
-    <p className="interest-note">เริ่มนับ {date(cycle.chargeStartDate)} ไม่นับวันที่ {date(cycle.accrualEndDate)}{!cycle.accruing && " (หยุดคิดดอกแล้ว)"} ปัดยอดสุดท้ายเป็นสตางค์ · ดอกที่เกิดขึ้นรวมส่วนที่จ่ายแล้ว ส่วนยอดปิดหนี้หักส่วนที่จ่ายแล้ว</p>
+    <p className="interest-note">เริ่มนับ {date(cycle.chargeStartDate)} ไม่นับวันที่ {date(cycle.accrualEndDate)}{!cycle.accruing && " (หยุดคิดดอกแล้ว)"} ปัดยอดสุดท้ายเป็นสตางค์ · ตัวเลขดอกเป็นข้อมูลอ้างอิง คุณกำหนดยอดที่เรียกเก็บเอง</p>
     {loan.startDate > loan.cycleStartDate && cycle.chargeStartDate === loan.startDate && <p className="interest-note">รอบแรกของหนี้ยกมานับเฉพาะวันที่เหลือจากวันเริ่มบันทึก ดอกครบงวดจึงอาจน้อยกว่าดอกเต็มรอบ</p>}
     <p className="interest-note">คาดการณ์โดยไม่มีรับคืนต้นหรือปรับยอดเพิ่ม รวมอัตราใหม่ที่ตั้งไว้แล้ว หากคืนต้นบางส่วน ดอกรอบนี้ยังใช้ฐานต้นต้นรอบ และลดลงในรอบถัดไป</p>
   </section>;

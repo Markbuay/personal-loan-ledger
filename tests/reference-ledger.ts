@@ -1,6 +1,9 @@
-import type { Adjustment, Loan, Payment, RateChange } from "../src/domain/types";
+import type { Adjustment, Loan, Payment, RateChange, LedgerSnapshot } from "../src/domain/types";
 
 type Input = { loan: Loan; payments: Payment[]; adjustments: Adjustment[]; rateChanges: RateChange[]; asOf: string };
+type ReferenceBalance = Pick<LedgerSnapshot, "principalCents" | "interestCents" | "accruedInterestCents" |
+  "payoffInterestCents" | "payoffTotalCents" | "totalCents" | "earnedInterestCents" | "principalPaidCents" |
+  "interestPaidCents" | "manualInterestDifferenceCents" | "uncollectedInterestCents" | "closed">;
 const day = (date: string) => Date.parse(`${date}T00:00:00Z`) / 86400000;
 const nextBoundary = (date: string, anchor: number) => {
   const value = new Date(`${date}T00:00:00Z`);
@@ -17,7 +20,7 @@ const roundedCharge = (principal: number, rate: number, elapsed: number, cycleDa
 
 /** Audit oracle: enumerates calendar intervals and derives each base from dated balances.
  * Does not call production date, interest, event-ordering, or calculation helpers. */
-export function referenceLedger(input: Input) {
+export function referenceLedger(input: Input, memo = new Map<string, ReferenceBalance>()): ReferenceBalance {
   const { loan, asOf } = input;
   const events = [
     ...input.payments.filter(p => p.loanId === loan.id && !p.canceledAt && p.date <= asOf)
@@ -26,13 +29,28 @@ export function referenceLedger(input: Input) {
       .map(value => ({ kind: "adjustment", value }) satisfies { kind: "adjustment"; value: Adjustment }),
   ].sort((a, b) => a.value.date.localeCompare(b.value.date)
     || a.value.createdAt.localeCompare(b.value.createdAt) || a.value.id.localeCompare(b.value.id));
+  const key = `${loan.id}:${asOf}:${events.map(event => `${event.kind}:${event.value.id}`).join(",")}`;
+  const cached = memo.get(key);
+  if (cached) return cached;
   let principal = loan.principalCents, paidPrincipal = 0, paidInterest = 0;
+  let appliedInterest = 0, uncollectedInterest = 0;
   let interestAdjustment = 0, stopped: string | undefined;
-  for (const event of events) {
+  for (const [index, event] of events.entries()) {
     if (event.kind === "adjustment") {
       principal += event.value.principalDeltaCents;
       interestAdjustment += event.value.interestDeltaCents;
     } else {
+      let applied = event.value.interestCents;
+      if (event.value.interestMode === "owner") {
+        const prior = events.slice(0, index);
+        const available = referenceLedger({ ...input, asOf: event.value.date,
+          payments: prior.filter(item => item.kind === "payment").map(item => item.value),
+          adjustments: prior.filter(item => item.kind === "adjustment").map(item => item.value),
+        }, memo).payoffInterestCents;
+        applied = Math.min(applied, available);
+        if (event.value.isPayoff) uncollectedInterest += available - applied;
+      }
+      appliedInterest += applied;
       if (!stopped && (event.value.isPayoff || event.value.principalCents === principal)) stopped = event.value.date;
       principal -= event.value.principalCents;
       paidPrincipal += event.value.principalCents;
@@ -47,7 +65,7 @@ export function referenceLedger(input: Input) {
   let posted = 0, accrued = 0;
   while (chargeStart < limit) {
     const cut = calendarEnd < limit ? calendarEnd : limit;
-    const rate = [...input.rateChanges].filter(change => change.loanId === loan.id && change.effectiveDate <= calendarStart)
+    const rate = [...input.rateChanges].filter(change => change.loanId === loan.id && !change.canceledAt && change.effectiveDate <= calendarStart)
       .sort((a, b) => b.effectiveDate.localeCompare(a.effectiveDate))[0]?.rateBps ?? loan.rateBps;
     const charge = roundedCharge(principalAt(chargeStart), rate, day(cut) - day(chargeStart), day(calendarEnd) - day(calendarStart));
     if (calendarEnd <= asOf && calendarEnd <= limit || stopped && stopped <= asOf && cut === stopped) posted += charge;
@@ -56,15 +74,19 @@ export function referenceLedger(input: Input) {
     calendarStart = calendarEnd;
     calendarEnd = nextBoundary(calendarEnd, loan.anchorDay);
   }
-  const due = loan.openingInterestCents + interestAdjustment + posted - paidInterest;
+  const due = loan.openingInterestCents + interestAdjustment + posted - appliedInterest - uncollectedInterest;
   const arrears = Math.max(0, due), payableAccrued = Math.max(0, accrued + Math.min(0, due));
-  return {
+  const result = {
     principalCents: principal, interestCents: arrears, accruedInterestCents: payableAccrued,
     payoffInterestCents: arrears + payableAccrued,
     payoffTotalCents: principal + arrears + payableAccrued,
     totalCents: principal + arrears,
     earnedInterestCents: posted + accrued,
     principalPaidCents: paidPrincipal, interestPaidCents: paidInterest,
+    manualInterestDifferenceCents: paidInterest - appliedInterest,
+    uncollectedInterestCents: uncollectedInterest,
     closed: principal === 0 && due + accrued === 0,
   };
+  memo.set(key, result);
+  return result;
 }

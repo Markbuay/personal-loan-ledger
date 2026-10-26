@@ -15,7 +15,6 @@ import {
   Plus,
   Search,
   History,
-  Percent,
   ChartNoAxesColumnIncreasing,
   MessageSquare,
   Info,
@@ -43,6 +42,9 @@ import {
 } from "./components/ui";
 import { calculateLedger, addMonths, todayBangkok } from "./domain/ledger";
 import { calculateInterestForecast } from "./domain/forecast";
+import { isLoanOverdue } from "./domain/status";
+import { loanDisplayName } from "./domain/loan-name";
+import { isRealLoan, loanCategory, realLedgerData, type LoanCategory } from "./domain/loan-records";
 import { InterestOverview, InterestDetail } from "./components/interest";
 import type {
   Borrower,
@@ -262,6 +264,7 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("all");
+  const [category, setCategory] = useState<LoanCategory>("active");
   const [busy, setBusy] = useState(false);
   const today = todayBangkok();
   async function reload() {
@@ -321,14 +324,19 @@ export default function App() {
       ),
     [data, today],
   );
-  const totals = [...snapshots.values()].reduce(
+  const realData = useMemo(() => realLedgerData(data), [data]);
+  const realSnapshots = realData.loans.flatMap(loan => {
+    const snapshot = snapshots.get(loan.id);
+    return snapshot ? [snapshot] : [];
+  });
+  const activeData = { ...realData, loans: realData.loans.filter(loan => !snapshots.get(loan.id)?.closed) };
+  const totals = realSnapshots.reduce(
     (a, s) => ({
       principal: a.principal + s.principalCents,
-      interest: a.interest + s.interestCents,
       principalPaid: a.principalPaid + s.principalPaidCents,
       interestPaid: a.interestPaid + s.interestPaidCents,
     }),
-    { principal: 0, interest: 0, principalPaid: 0, interestPaid: 0 },
+    { principal: 0, principalPaid: 0, interestPaid: 0 },
   );
   const forecasts = useMemo(
     () => new Map(data.loans.map((loan) => [loan.id, calculateInterestForecast({
@@ -341,23 +349,27 @@ export default function App() {
     data.borrowers.find((b) => b.id === id)?.name || "ผู้กู้";
   const loans = data.loans.filter(
     (l) =>
-      borrowerName(l.borrowerId).includes(search) &&
-      (filter === "all" ||
-        (filter === "closed"
-          ? snapshots.get(l.id)?.closed
-          : filter === "overdue"
-            ? l.dueDate < today && !snapshots.get(l.id)?.closed
-            : !snapshots.get(l.id)?.closed)),
+      loanDisplayName(borrowerName(l.borrowerId), l).includes(search) &&
+      loanCategory(l, snapshots.get(l.id)) === category &&
+      (category !== "active" || filter !== "overdue" || isLoanOverdue(l, today)),
   );
-  const dueLoans = data.loans
-    .filter((l) => !snapshots.get(l.id)?.closed)
+  const dueLoans = realData.loans
+    .filter((l) => !snapshots.get(l.id)?.closed && (l.dueDate >= today || isLoanOverdue(l, today)))
     .sort((a, b) => a.dueDate.localeCompare(b.dueDate));
-  const selectedLoan = data.loans.find((l) => l.id === selected);
+  const selectedLoan = data.loans.find((l) => l.id === selected && l.recordStatus !== "trashed-test");
   const snapshot = selectedLoan ? snapshots.get(selectedLoan.id) : undefined;
   async function mutate(path: string, body: unknown, method = "POST") {
     await api(path, body, method);
     await reload();
     setNotice("บันทึกเรียบร้อยแล้ว");
+  }
+  async function setLoanStatus(loan: Loan) {
+    setBusy(true);
+    try {
+      await mutate(`/loans/${loan.id}`, { statusOverride: loan.statusOverride === "normal" ? "auto" : "normal",
+        reason: loan.statusOverride === "normal" ? "เจ้าของเลือกใช้สถานะตามวันนัด" : "เจ้าของตั้งสถานะปกติ" }, "PATCH");
+    } catch (err) { setError(err instanceof Error ? err.message : "เปลี่ยนสถานะไม่สำเร็จ"); }
+    finally { setBusy(false); }
   }
   if (!auth)
     return <div className="loading">{error || "กำลังเปิดบัญชีเงินกู้…"}</div>;
@@ -411,7 +423,7 @@ export default function App() {
           <div>
             <h1>
               {selectedLoan
-                ? borrowerName(selectedLoan.borrowerId)
+                ? loanDisplayName(borrowerName(selectedLoan.borrowerId), selectedLoan)
                 : page === "overview"
                   ? "ภาพรวมบัญชี"
                   : nav.find((n) => n.id === page)?.title}
@@ -423,6 +435,7 @@ export default function App() {
                   ? "ติดตามเงินต้น ดอกเบี้ย และการชำระในที่เดียว"
                   : "บัญชีเงินกู้ส่วนตัวของคุณ"}
             </p>
+            {selectedLoan && <button className="text-button" onClick={() => setModal({ kind: "loan-purpose", loan: selectedLoan })}>ตั้งชื่อรายการกู้</button>}
           </div>
           <div className="header-actions">
             <Button onClick={() => setModal({ kind: "loan" })}>
@@ -452,6 +465,8 @@ export default function App() {
           <LoanDetail
             loan={selectedLoan}
             snapshot={snapshot}
+            setStatus={setLoanStatus}
+            busy={busy}
             forecast={forecasts.get(selectedLoan.id)}
             data={data}
             back={() => setSelected(undefined)}
@@ -472,11 +487,6 @@ export default function App() {
                       label: "รับคืนต้นแล้ว",
                       value: totals.principalPaid,
                       icon: History,
-                    },
-                    {
-                      label: "ดอกเบี้ยคงค้าง",
-                      value: totals.interest,
-                      icon: Percent,
                     },
                     {
                       label: "รับดอกเบี้ยแล้ว",
@@ -502,7 +512,8 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                <InterestOverview data={data} forecasts={forecasts} select={setSelected} today={today} />
+                <p className="portfolio-scope">ยอดบัญชีจริงรวมเงินที่รับจากสัญญาปิดแล้ว · ไม่รวมสัญญาทดลองและถังขยะ</p>
+                <InterestOverview data={activeData} forecasts={forecasts} select={setSelected} today={today} />
                 <div className="dashboard-grid">
                   <section className="panel contracts">
                     <div className="panel-heading">
@@ -516,29 +527,31 @@ export default function App() {
                             onChange={(e) => setSearch(e.target.value)}
                           />
                         </label>
-                        <select
+                        {category === "active" && <select
                           aria-label="กรองสัญญา"
                           value={filter}
                           onChange={(e) => setFilter(e.target.value)}
                         >
-                          <option value="all">ทั้งหมด</option>
-                          <option value="active">กำลังชำระ</option>
+                          <option value="all">ทุกสัญญาในหมวด</option>
                           <option value="overdue">เกินกำหนด</option>
-                          <option value="closed">ปิดแล้ว</option>
-                        </select>
+                        </select>}
                       </div>
                     </div>
+                    <LoanCategories data={data} snapshots={snapshots} value={category} onChange={setCategory} />
                     <LoanTable
                       loans={loans}
                       snapshots={snapshots}
+                      setStatus={setLoanStatus}
+                      busy={busy}
                       name={borrowerName}
                       select={setSelected}
+                      open={setModal}
                     />
                     {!loans.length && (
                       <Empty
                         title={
                           data.loans.length
-                            ? "ไม่พบสัญญาที่ค้นหา"
+                            ? "ยังไม่มีสัญญาในหมวดนี้"
                             : "เริ่มบันทึกสัญญาแรกของคุณ"
                         }
                         text="เพิ่มสัญญาเพื่อเริ่มติดตามเงินต้น ดอกเบี้ย และการชำระได้ทันที"
@@ -564,7 +577,7 @@ export default function App() {
                                 {borrowerName(l.borrowerId).slice(0, 1)}
                               </span>
                               <div>
-                                <strong>{borrowerName(l.borrowerId)}</strong>
+                                <strong>{loanDisplayName(borrowerName(l.borrowerId), l)}</strong>
                                 <small>{date(l.dueDate)}</small>
                               </div>
                               <span
@@ -633,7 +646,8 @@ export default function App() {
                   </Empty>
                 ) : (
                   <div className="borrower-list">
-                    {data.borrowers.map((b) => (
+                    <LoanCategories data={data} snapshots={snapshots} value={category} onChange={setCategory} />
+                    {data.borrowers.filter(b => !data.loans.some(l => l.borrowerId === b.id) || data.loans.some(l => l.borrowerId === b.id && loanCategory(l, snapshots.get(l.id)) === category)).map((b) => (
                       <article key={b.id}>
                         <div className="borrower-heading">
                           <span className="avatar">{b.name.slice(0, 1)}</span>
@@ -662,9 +676,12 @@ export default function App() {
                         </div>
                         <LoanTable
                           loans={data.loans.filter(
-                            (l) => l.borrowerId === b.id,
+                            (l) => l.borrowerId === b.id && loanCategory(l, snapshots.get(l.id)) === category,
                           )}
                           snapshots={snapshots}
+                          open={setModal}
+                          setStatus={setLoanStatus}
+                          busy={busy}
                           name={borrowerName}
                           select={setSelected}
                         />
@@ -691,7 +708,7 @@ export default function App() {
                       </tr>
                     </thead>
                     <tbody>
-                      {data.payments
+                      {realData.payments
                         .toSorted((a, b) => b.date.localeCompare(a.date))
                         .map((p) => {
                           const loan = data.loans.find(
@@ -703,8 +720,8 @@ export default function App() {
                               onClick={() => setSelected(p.loanId)}
                             >
                               <td>
-                                {loan ? borrowerName(loan.borrowerId) : ""}
-                                <small>{date(p.date)}</small>
+                                {loan ? loanDisplayName(borrowerName(loan.borrowerId), loan) : ""}
+                                <small>{date(p.date)}{p.dateEstimated && " · วันที่บันทึก ไม่ทราบวันจ่ายจริง"}</small>
                               </td>
                               <td>฿{money(p.totalCents)}</td>
                               <td>฿{money(p.principalCents)}</td>
@@ -726,7 +743,7 @@ export default function App() {
                     </tbody>
                   </table>
                 </div>
-                {!data.payments.length && (
+                {!realData.payments.length && (
                   <Empty
                     title="ยังไม่มีประวัติรับชำระ"
                     text="เปิดสัญญาเพื่อบันทึกเงินที่ได้รับ"
@@ -766,10 +783,9 @@ export default function App() {
                     {dueLoans.map((l) => (
                       <div key={l.id}>
                         <div>
-                          <h3>{borrowerName(l.borrowerId)}</h3>
+                          <h3>{loanDisplayName(borrowerName(l.borrowerId), l)}</h3>
                           <p>
-                            นัดชำระ {date(l.dueDate)} · ดอกค้าง ฿
-                            {money(snapshots.get(l.id)?.interestCents || 0)}
+                            นัดชำระ {date(l.dueDate)}
                           </p>
                         </div>
                         <Button secondary onClick={() => setSelected(l.id)}>
@@ -830,6 +846,16 @@ export default function App() {
                 await reload();
               }
               setModal(undefined);
+              if (modal.kind === "loan") {
+                setSelected(undefined);
+                setPage("overview");
+                setCategory(body && typeof body === "object" && "isTest" in body && body.isTest === true ? "test" : "active");
+              }
+              if (modal.kind === "loan-record") {
+                setSelected(undefined);
+                setPage("overview");
+                setCategory(modal.action === "mark-real" ? (snapshots.get(modal.loan.id)?.closed ? "closed" : "active") : "test");
+              }
             } catch (e) {
               throw e;
             } finally {
@@ -853,16 +879,42 @@ export default function App() {
   );
 }
 
+const loanCategories: Array<{ id: LoanCategory; label: string }> = [
+  { id: "active", label: "กำลังชำระ" },
+  { id: "closed", label: "ปิดแล้ว" },
+  { id: "test", label: "ทดลอง" },
+  { id: "trashed-test", label: "ถังขยะทดลอง" },
+];
+function LoanCategories({ data, snapshots, value, onChange }: {
+  data: LedgerData;
+  snapshots: Map<string, LedgerSnapshot>;
+  value: LoanCategory;
+  onChange: (category: LoanCategory) => void;
+}) {
+  return <div className="loan-categories" role="group" aria-label="หมวดสัญญา">
+    {loanCategories.map(item => <button key={item.id} type="button" aria-pressed={value === item.id}
+      className={value === item.id ? "selected" : ""} onClick={() => onChange(item.id)}>
+      {item.label} ({data.loans.filter(loan => loanCategory(loan, snapshots.get(loan.id)) === item.id).length})
+    </button>)}
+    {(value === "test" || value === "trashed-test") && <p>ข้อมูลในหมวดนี้ไม่นับรวมในยอดเงินจริง ดอกคาดการณ์ และรายการเตือน</p>}
+  </div>;
+}
 function LoanTable({
   loans,
   snapshots,
   name,
   select,
+  setStatus,
+  busy,
+  open,
 }: {
   loans: Loan[];
   snapshots: Map<string, LedgerSnapshot>;
   name: (id: string) => string;
   select: (id: string) => void;
+  setStatus: (loan: Loan) => void;
+  busy: boolean;
+  open: (modal: Modal) => void;
 }) {
   return (
     <div className="table-scroll">
@@ -871,7 +923,6 @@ function LoanTable({
           <tr>
             <th>ผู้กู้</th>
             <th>เงินต้นคงเหลือ</th>
-            <th>ดอกเบี้ยคงค้าง</th>
             <th>ครบกำหนด</th>
             <th>สถานะ</th>
           </tr>
@@ -880,10 +931,10 @@ function LoanTable({
           {loans.map((l) => {
             const s = snapshots.get(l.id);
             return (
-              <tr key={l.id} onClick={() => select(l.id)}>
+              <tr key={l.id} onClick={() => { if (l.recordStatus !== "trashed-test") select(l.id); }}>
                 <td>
-                  <button className="table-name" onClick={() => select(l.id)}>
-                    {name(l.borrowerId)}
+                  <button className="table-name" disabled={l.recordStatus === "trashed-test"} onClick={() => select(l.id)}>
+                    {loanDisplayName(name(l.borrowerId), l)}
                   </button>
                   <small>
                     {s?.currentRateBps === 0
@@ -892,18 +943,27 @@ function LoanTable({
                   </small>
                 </td>
                 <td>฿{money(s?.principalCents || 0)}</td>
-                <td>฿{money(s?.interestCents || 0)}</td>
                 <td>{date(l.dueDate)}</td>
                 <td>
                   <span
-                    className={`badge ${!s?.closed && l.dueDate < todayBangkok() ? "late" : ""}`}
+                    className={`badge ${!s?.closed && isLoanOverdue(l, todayBangkok()) ? "late" : ""}`}
                   >
-                    {s?.closed
+                    {l.recordStatus === "trashed-test" ? "ลบแล้ว · ทดลอง" : l.recordStatus === "test" ? "ทดลอง · ไม่รวมยอด" : s?.closed
                       ? "ปิดแล้ว"
-                      : l.dueDate < todayBangkok()
+                      : isLoanOverdue(l, todayBangkok())
                         ? "เกินกำหนด"
-                        : "กำลังชำระ"}
+                        : "ปกติ"}
                   </span>
+                  {l.recordStatus && <button className="text-button status-toggle" disabled={busy}
+                    onClick={event => { event.stopPropagation(); open({ kind: "loan-record", loan: l, action: l.recordStatus === "trashed-test" ? "restore-test" : "trash-test" }); }}>
+                    {l.recordStatus === "trashed-test" ? "กู้คืนสัญญาทดลอง" : "ลบสัญญาทดลอง"}
+                  </button>}
+                  {isRealLoan(l) && !s?.closed && (isLoanOverdue(l, todayBangkok()) || l.statusOverride === "normal") && <button
+                    className="text-button status-toggle" disabled={busy}
+                    aria-label={`${l.statusOverride === "normal" ? "ใช้สถานะตามวันนัด" : "ตั้งสถานะปกติ"} ${loanDisplayName(name(l.borrowerId), l)} ต้นเริ่ม ${money(l.principalCents)}`}
+                    onClick={(event) => { event.stopPropagation(); setStatus(l); }}>
+                    {l.statusOverride === "normal" ? "ใช้สถานะตามวันนัด" : "ตั้งสถานะปกติ"}
+                  </button>}
                 </td>
               </tr>
             );
@@ -920,6 +980,8 @@ function LoanDetail({
   data,
   back,
   open,
+  setStatus,
+  busy,
 }: {
   loan: Loan;
   snapshot: LedgerSnapshot;
@@ -927,6 +989,8 @@ function LoanDetail({
   data: LedgerData;
   back: () => void;
   open: (modal: Modal) => void;
+  setStatus: (loan: Loan) => void;
+  busy: boolean;
 }) {
   const borrower = data.borrowers.find((b) => b.id === loan.borrowerId);
   const loanAttachments = data.attachments.filter(
@@ -944,8 +1008,8 @@ function LoanDetail({
         <section className="panel detail-main">
           <div className="panel-heading">
             <h2>รายละเอียดสัญญา</h2>
-            <span className="badge">
-              {s.closed ? "ปิดหนี้แล้ว" : "กำลังชำระ"}
+            <span className={`badge ${!s.closed && isLoanOverdue(loan, todayBangkok()) ? "late" : ""}`}>
+              {s.closed ? "ปิดหนี้แล้ว" : isLoanOverdue(loan, todayBangkok()) ? "เกินกำหนด" : "ปกติ"}
             </span>
           </div>
           <div className="detail-totals">
@@ -954,13 +1018,14 @@ function LoanDetail({
               <strong>฿{money(s.principalCents)}</strong>
             </div>
             <div>
-              <p>ดอกเบี้ยคงค้าง</p>
-              <strong>฿{money(s.interestCents)}</strong>
+              <p>รับคืนต้นแล้ว</p>
+              <strong>฿{money(s.principalPaidCents)}</strong>
+              {loan.source === "existing" && <small>ตั้งแต่เริ่มบันทึก</small>}
             </div>
             <div>
-              <p>ยอดปิดหนี้ ณ วันนี้</p>
-              <strong>฿{money(s.payoffTotalCents)}</strong>
-              <small>รวมดอกระหว่างรอบ ฿{money(s.accruedInterestCents)}</small>
+              <p>รับดอกเบี้ยแล้ว</p>
+              <strong>฿{money(s.interestPaidCents)}</strong>
+              {loan.source === "existing" && <small>ตั้งแต่เริ่มบันทึก</small>}
             </div>
           </div>
           {forecast && <InterestDetail forecast={forecast} loan={loan} />}
@@ -1000,6 +1065,14 @@ function LoanDetail({
               </dt>
               <dd>฿{money(s.interestPaidCents)}</dd>
             </div>
+            {s.manualInterestDifferenceCents > 0 && <div>
+              <dt>ดอกรับตามตกลงส่วนที่เกินยอดสูตร</dt>
+              <dd>฿{money(s.manualInterestDifferenceCents)} · ไม่เป็นเครดิตงวดถัดไป</dd>
+            </div>}
+            {s.uncollectedInterestCents > 0 && <div>
+              <dt>ดอกตามสูตรที่ไม่ได้เรียกเก็บตอนปิด</dt>
+              <dd>฿{money(s.uncollectedInterestCents)} · ไม่นับเป็นเงินรับจริง</dd>
+            </div>}
             {loan.source === "existing" && (
               <>
                 <div>
@@ -1019,7 +1092,12 @@ function LoanDetail({
             </p>
           )}
           {loan.notes && <p className="panel-note">{loan.notes}</p>}
+          {loan.recordStatus === "test" && <p className="panel-note">สัญญาทดลอง · ยอดของสัญญานี้และประวัติรับชำระไม่นับรวมในบัญชีจริง</p>}
           <div className="actions-wrap">
+            <Button secondary onClick={() => open({ kind: "loan-record", loan, action: isRealLoan(loan) ? "mark-test" : "mark-real" })}>
+              {isRealLoan(loan) ? "ย้ายเป็นสัญญาทดลอง" : "เปลี่ยนเป็นสัญญาจริง"}
+            </Button>
+            {loan.recordStatus === "test" && <Button secondary onClick={() => open({ kind: "loan-record", loan, action: "trash-test" })}>ลบสัญญาทดลอง</Button>}
             {!s.closed && (
               <>
                 <Button onClick={() => open({ kind: "payment", loan })}>
@@ -1030,13 +1108,16 @@ function LoanDetail({
                   secondary
                   onClick={() => open({ kind: "payoff", loan })}
                 >
-                  ปิดหนี้ตามวัน
+                  ปิดหนี้
                 </Button>
-                <Button secondary onClick={() => open({ kind: "due", loan })}>
-                  เลื่อนวันนัด
+                <Button secondary onClick={() => open({ kind: "loan-correction", loan })}>
+                  แก้ต้น / ดอก / วันนัด
+                </Button>
+                <Button secondary disabled={busy} onClick={() => setStatus(loan)}>
+                  {loan.statusOverride === "normal" ? "ใช้สถานะตามวันนัด" : "ตั้งสถานะปกติ"}
                 </Button>
                 <Button secondary onClick={() => open({ kind: "rate", loan })}>
-                  เปลี่ยนอัตรา
+                  เปลี่ยนอัตรางวดถัดไป
                 </Button>
               </>
             )}
@@ -1044,7 +1125,7 @@ function LoanDetail({
               secondary
               onClick={() => open({ kind: "adjustment", loan })}
             >
-              ปรับปรุงยอด
+              เพิ่ม/ลดยอด (ขั้นสูง)
             </Button>
             <Button
               secondary
@@ -1102,6 +1183,9 @@ function LoanDetail({
                   {date(p.date)} · {p.isPayoff ? "ปิดหนี้" : "รับชำระ"} ฿
                   {money(p.totalCents)}
                 </strong>
+                {p.dateEstimated && <p>จำวันที่จ่ายจริงไม่ได้ ใช้วันที่บันทึก {date(p.date)}</p>}
+                {p.interestMode === "owner" && <small>ยอดดอกตามที่เจ้าของระบุ</small>}
+                {p.replacesPaymentId && <small> · แก้ไขจากรายการ {p.replacesPaymentId.slice(0, 8)}</small>}
                 <p>
                   คืนต้น ฿{money(p.principalCents)} · ชำระดอก ฿
                   {money(p.interestCents)} {p.note}
@@ -1109,6 +1193,8 @@ function LoanDetail({
                 {p.canceledAt ? (
                   <small>ยกเลิก: {p.cancelReason}</small>
                 ) : (
+                  <>
+                  <button className="text-button" onClick={() => open({ kind: "edit-payment", loan, payment: p })}>แก้ไข</button>
                   <button
                     className="text-button danger"
                     onClick={() =>
@@ -1117,6 +1203,7 @@ function LoanDetail({
                   >
                     ยกเลิกรายการ
                   </button>
+                  </>
                 )}
                 <button
                   className="text-button"
@@ -1147,12 +1234,13 @@ function LoanDetail({
           {data.rateChanges
             .filter((r) => r.loanId === loan.id)
             .map((r) => (
-              <div key={r.id}>
+              <div key={r.id} className={r.canceledAt ? "canceled" : ""}>
                 <span className="timeline-dot" />
                 <strong>
                   อัตรา {r.rateBps / 100}% มีผล {date(r.effectiveDate)}
                 </strong>
                 <p>{r.reason}</p>
+                {r.canceledAt && <small>ยกเลิก: {r.cancelReason}</small>}
               </div>
             ))}
           {data.adjustments

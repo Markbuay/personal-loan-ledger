@@ -110,7 +110,9 @@ export function calculateLedger({
   let base = principal,
     rate = loan.rateBps,
     principalPaid = 0,
-    interestPaid = 0;
+    interestPaid = 0,
+    manualInterestDifference = 0,
+    uncollectedInterest = 0;
   const periods: InterestPeriod[] = [];
   let finalized = false;
   let accrualEnd = asOf;
@@ -118,7 +120,7 @@ export function calculateLedger({
     (p) => p.loanId === loan.id && !p.canceledAt && p.date <= asOf,
   );
   const selectedRates = rateChanges
-    .filter((c) => c.loanId === loan.id)
+    .filter((c) => c.loanId === loan.id && !c.canceledAt)
     .sort((a, b) => a.effectiveDate.localeCompare(b.effectiveDate));
   for (const change of selectedRates)
     if (change.effectiveDate <= fullStart) rate = change.rateBps;
@@ -195,7 +197,18 @@ export function calculateLedger({
       accrualEnd = p.date;
     }
     principal -= p.principalCents;
-    dueInterest -= p.interestCents;
+    let appliedInterest = p.interestCents;
+    if (p.interestMode === "owner") {
+      const accruedAtReceipt = finalized ? 0
+        : interest(base, rate, daysBetween(start, p.date), daysBetween(fullStart, end));
+      appliedInterest = Math.min(p.interestCents, Math.max(0, dueInterest + accruedAtReceipt));
+      manualInterestDifference += p.interestCents - appliedInterest;
+    }
+    dueInterest -= appliedInterest;
+    if (p.isPayoff && p.interestMode === "owner") {
+      uncollectedInterest += Math.max(0, dueInterest);
+      dueInterest = 0;
+    }
     principalPaid += p.principalCents;
     interestPaid += p.interestCents;
     if (p.date === start) base = principal;
@@ -228,6 +241,8 @@ export function calculateLedger({
     accrued,
     principalPaid,
     interestPaid,
+    manualInterestDifference,
+    uncollectedInterest,
     earnedInterest,
     cycleForecast,
     principal + arrears + payableAccrued,
@@ -244,6 +259,8 @@ export function calculateLedger({
     payoffTotalCents: principal + arrears + payableAccrued,
     principalPaidCents: principalPaid,
     interestPaidCents: interestPaid,
+    manualInterestDifferenceCents: manualInterestDifference,
+    uncollectedInterestCents: uncollectedInterest,
     currentRateBps: rate,
     currentCycleStartDate: fullStart,
     currentCycleEndDate: end,
@@ -300,12 +317,12 @@ export function validatePayment(
   if (balance.closed) throw new Error("รายการกู้นี้ปิดหนี้แล้ว");
   if (payment.principalCents > balance.principalCents)
     throw new Error("ยอดคืนต้นเกินเงินต้นคงเหลือ");
-  if (payment.interestCents > balance.payoffInterestCents)
+  if (payment.interestMode !== "owner" && payment.interestCents > balance.payoffInterestCents)
     throw new Error("ยอดชำระดอกเกินดอกที่เกิดขึ้นถึงวันรับชำระ");
   if (
     payment.isPayoff &&
     (payment.principalCents !== balance.principalCents ||
-      payment.interestCents !== balance.payoffInterestCents)
+      (payment.interestMode !== "owner" && payment.interestCents !== balance.payoffInterestCents))
   )
     throw new Error("ยอดปิดหนี้ต้องตรงกับต้นและดอกถึงวันรับชำระ");
 }
